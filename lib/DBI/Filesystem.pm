@@ -140,7 +140,7 @@ sub dbh {
 					  AutoCommit=>1}) or croak DBI->errstr;
 }
 
-sub create_node {
+sub create_inode {
     my $self        = shift;
     my ($name,$type,$mode,$parent,$uid,$gid) = @_;
 
@@ -152,11 +152,15 @@ sub create_node {
     $gid ||= 0;
 
     my $dbh = $self->dbh;
-    my $sth = $dbh->prepare("insert into node (name,parent,mode,uid,gid,mtime,ctime,atime) values(?,?,?,?,?,null,null,null)");
+    my $sth = $dbh->prepare("insert into metadata (mode,uid,gid,mtime,ctime,atime) values(?,?,?,null,null,null)");
     $name =~ s!/!_!g;
-    $sth->execute($name,$parent,$mode,$uid,$gid) or die $sth->errstr;
+    $sth->execute($mode,$uid,$gid) or die $sth->errstr;
     $sth->finish;
-    return $dbh->last_insert_id(undef,undef,undef,undef);
+    my $inode = $dbh->last_insert_id(undef,undef,undef,undef);
+    $sth      = $dbh->prepare('insert into path (inode,name,parent) values (?,?,?)');
+    $sth->execute($inode,$name,$parent)           or die $sth->errstr;
+    $sth->finish;
+    return $inode;
 }
 
 sub create_path {
@@ -166,7 +170,7 @@ sub create_path {
     $dir       = '/' if $dir eq '.'; # work around funniness in dirname()
     my $base   = basename($path);
     my $parent = $self->path2inode($dir) or return;
-    $self->create_node($base,$type,$mode,$parent,$uid,$gid);
+    $self->create_inode($base,$type,$mode,$parent,$uid,$gid);
 }
 
 sub create_file { 
@@ -184,10 +188,18 @@ sub create_directory {
 sub unlink_file {
     my $self  = shift;
     my $path  = shift;
-    my $inode = $self->path2inode($path) ;
+    my ($inode,$parent,$name)  = $self->path2inode($path) ;
     $self->_isdir($inode)               and croak "$path is a directory";
-    my $dbh = $self->dbh;
-    $dbh->do("delete from node where inode=$inode") or die $dbh->errstr;
+    my $dbh                    = $self->dbh;
+    my $sth                    = $dbh->prepare("delete from path where inode=? and parent=? and name=?") 
+	or die $dbh->errstr;
+    $sth->execute($inode,$parent,$name) or die $dbh->errstr;
+
+    $dbh->do("update metadata set links=links-1 where inode=$inode");
+    my ($links,$inuse) = $dbh->selectrow_array("select links,inuse from metadata where inode=$inode");
+    if ($links <=0 && $inuse<=0) {
+	$dbh->do("delete from metadata where inode=$inode") or die $dbh->errstr;
+    }
 }
 
 sub remove_dir {
@@ -198,7 +210,7 @@ sub remove_dir {
     $self->_entries($inode )            and croak "$path is not empty";
 
     my $dbh   = $self->dbh;
-    $dbh->do("delete from node where inode=$inode") or die $dbh->errstr;
+    $dbh->do("delete from path where inode=$inode") or die $dbh->errstr;
 }    
 
 sub chown {
@@ -206,7 +218,7 @@ sub chown {
     my ($path,$uid)  = @_;
     my $inode        = $self->path2inode($path) ;
     my $dbh          = $self->dbh;
-    return $dbh->do("update node set uid=$uid where inode=$inode");
+    return $dbh->do("update metadata set uid=$uid where inode=$inode");
 }
 
 sub chgrp {
@@ -214,7 +226,7 @@ sub chgrp {
     my ($path,$gid)  = @_;
     my $inode        = $self->path2inode($path) ;
     my $dbh          = $self->dbh;
-    return $dbh->do("update node set gid=$gid where inode=$inode");
+    return $dbh->do("update metadata set gid=$gid where inode=$inode");
 }
 
 sub chmod {
@@ -222,7 +234,7 @@ sub chmod {
     my ($path,$mode) = @_;
     my $inode        = $self->path2inode($path) ;
     my $dbh          = $self->dbh;
-    return $dbh->do("update node set mode=((0xf000&mode)|$mode) where inode=$inode");
+    return $dbh->do("update metadata set mode=((0xf000&mode)|$mode) where inode=$inode");
 }
 
 sub stat {
@@ -235,8 +247,8 @@ sub stat {
 select n.inode,mode,uid,gid,
        unix_timestamp(ctime),unix_timestamp(mtime),unix_timestamp(atime),
        if(isnull(contents),0,length(contents))
- from node as n
- left join contents as c on (n.inode=c.inode)
+ from metadata as n
+ left join data as c on (n.inode=c.inode)
  where n.inode=$inode
 END
 ;
@@ -258,7 +270,7 @@ sub read {
     my $dbh    = $self->dbh;
     $offset  ||= 0;
     $offset++;  # sql uses 1-based string indexing
-    my ($data) = $dbh->selectrow_array("select substring(contents,$offset,$length) from contents where inode=$inode");
+    my ($data) = $dbh->selectrow_array("select substring(contents,$offset,$length) from data where inode=$inode");
     return $data;
 }
 
@@ -277,7 +289,7 @@ sub write {
     $stat[7] >= $offset or croak "offset beyond end of file";
 
     my $sth = $dbh->prepare(<<END) or die $dbh->errstr;
-insert into contents (inode,contents) values (?,?)
+insert into data (inode,contents) values (?,?)
  on duplicate key update contents=insert(contents,?,?,?)
 END
 ;
@@ -297,7 +309,7 @@ sub _isdir {
     my $self  = shift;
     my $inode = shift;
     my $dbh   = $self->dbh;
-    my ($result) = $dbh->selectrow_array("select (0xf000&mode)=0x4000 from node where inode=$inode")
+    my ($result) = $dbh->selectrow_array("select (0xf000&mode)=0x4000 from metadata where inode=$inode")
 	or die $dbh->errstr;
     return $result;
 }
@@ -312,9 +324,8 @@ sub touch {
 sub _touch {
     my $self  = shift;
     my $inode = shift;
-    warn "_touch";
     my $dbh   = $self->dbh;
-    $dbh->do("update node set mtime=now() where inode=$inode");
+    $dbh->do("update metadata set mtime=now() where inode=$inode");
 }
 
 sub utime {
@@ -323,7 +334,7 @@ sub utime {
     warn "$path: atime=$atime, mtime=$mtime";
     my $inode = $self->path2inode($path) ;
     my $dbh    = $self->dbh;
-    my $sth    = $dbh->prepare("update node set atime=from_unixtime(?),mtime=from_unixtime(?)");
+    my $sth    = $dbh->prepare("update metadata set atime=from_unixtime(?),mtime=from_unixtime(?)");
     my $result = $sth->execute($atime,$mtime);
     $sth->finish();
     return $result;
@@ -341,10 +352,12 @@ sub _entries {
     my $self  = shift;
     my $inode = shift;
     my $dbh   = $self->dbh;
-    my $col   = $dbh->selectcol_arrayref("select name from node where parent=$inode");
+    my $col   = $dbh->selectcol_arrayref("select name from path where parent=$inode");
     return @$col;
 }
 
+# in scalar context return inode
+# in list context return (inode,parent_inode,name)
 sub path2inode {
     my $self   = shift;
     my $path   = shift;
@@ -354,33 +367,40 @@ sub path2inode {
     $sth->execute(@bind);
     my @v      = $sth->fetchrow_array() or croak "$path not found";
     $sth->finish;
-    return $v[0];
+    return wantarray ? @v : $v[0];
 }
 
 sub _path2inode_sql {
     my $self   = shift;
-    my $path   = shift;
+    my ($path,$subselect)  = @_;
     $path     =~ s!/$!!;
     return ('select 1') if !$path;
     my (undef,$dir,$base) = File::Spec->splitpath($path);
-    my ($parent,@base)    = $self->_path2inode_sql($dir); # something nicely recursive
-    my $sql               = "select inode from node where name=? and parent in ($parent)";
+    my ($parent,@base)    = $self->_path2inode_sql($dir,$subselect++); # something nicely recursive
+    my $fields            = $subselect ? 'm.inode' : 'm.inode,p.parent,p.name';
+    my $sql               = <<END;
+select $fields from metadata as m,path as p 
+       where p.name=? and p.parent in ($parent) 
+         and m.inode=p.inode
+END
+;
     return ($sql,$base,@base);
 }
 
 sub _initialize_schema {
     my $self = shift;
     my $dbh  = $self->dbh;
-    $dbh->do('drop table if exists node')     or croak $dbh->errstr;
-    $dbh->do('drop table if exists contents') or croak $dbh->errstr;
+    $dbh->do('drop table if exists metadata') or croak $dbh->errstr;
+    $dbh->do('drop table if exists path')     or croak $dbh->errstr;
+    $dbh->do('drop table if exists data')     or croak $dbh->errstr;
     $dbh->do(<<END)                           or croak $dbh->errstr;
-create table node (
+create table metadata (
     inode        int(10)      auto_increment primary key,
-    parent       int(10),
-    name         varchar(255) not null,
     mode         int(10)      not null,
     uid          int(10)      not null,
     gid          int(10)      not null,
+    links        int(10)      default 1,
+    inuse        int(10)      default 0,
     mtime        timestamp,
     ctime        timestamp,
     atime        timestamp
@@ -388,7 +408,16 @@ create table node (
 END
 ;
     $dbh->do(<<END)                       or croak $dbh->errstr;
-create table contents (
+create table path (
+    inode        int(10)      not null,
+    name         varchar(255) not null,
+    parent       int(10),
+    index path (parent,name)
+)
+END
+    ;
+    $dbh->do(<<END)                       or croak $dbh->errstr;
+create table data (
     inode        int(10)      primary key,
     contents     longblob
 )
@@ -397,7 +426,9 @@ END
     # create the root node
     # should update this to use fuse_get_context to get proper uid, gid and masked permissions
     my $mode = 0040000|0777;
-    $dbh->do("insert into node (inode,name,parent,mode,uid,gid,mtime,ctime,atime) values(1,'/',null,$mode,0,0,null,null,null)") 
+    $dbh->do("insert into metadata (inode,mode,uid,gid,mtime,ctime,atime) values(1,$mode,0,0,null,null,null)") 
+	or croak $dbh->errstr;
+    $dbh->do("insert into path (inode,name,parent) values (1,'/',null)")
 	or croak $dbh->errstr;
 }
 

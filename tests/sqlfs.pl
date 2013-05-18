@@ -5,7 +5,10 @@ use FindBin '$Bin';
 use lib "$Bin/../lib";
 use DBI::Filesystem;
 
-my $fs = DBI::Filesystem->new('dbi:mysql:filesystem;user=lstein;password=blah','create');
-$fs->mount("$Bin/../foo");
+my $dsn = shift || 'dbi:mysql:filesystem;user=lstein;password=blah';
+my $mnt = shift || "$Bin/../foo";
+
+my $fs = DBI::Filesystem->new($dsn,'create');
+$fs->mount($mnt);
 
 exit 0;
