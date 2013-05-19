@@ -24,7 +24,7 @@ License 2.0. See http://www.perlfoundation.org/artistic_license_2_0.
 use strict;
 use warnings;
 use DBI;
-use Fuse;
+use Fuse 'fuse_get_context';
 use threads;
 use threads::shared;
 use File::Basename 'basename','dirname';
@@ -32,10 +32,13 @@ use File::Spec;
 use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO);
 use Carp 'croak';
 
+use constant MAX_PATH_LEN => 4096;  # characters
+
 sub new {
     my $class = shift;
     my ($dsn,$create) = @_;
     my $self  = bless {dsn=>$dsn},ref $class || $class;
+    local $self->{dbh};  # to avoid cloning database handle into child threads
     $self->_initialize_schema if $create;
     return $self;
 }
@@ -62,9 +65,12 @@ sub mount {
 	       mkdir      => "$pkg\:\:e_mkdir",
 	       rmdir      => "$pkg\:\:e_rmdir",
 	       link       => "$pkg\:\:e_link",
+	       symlink    => "$pkg\:\:e_symlink",
+	       readlink   => "$pkg\:\:e_readlink",
 	       unlink     => "$pkg\:\:e_unlink",
 	       utime      => "$pkg\:\:e_utime",
-	       threaded   => 0,
+	       debug      => 0,
+	       threaded   => 1,
 	);
 }
 
@@ -141,6 +147,23 @@ sub e_link {
     return 0;
 }
 
+sub e_symlink {
+    my ($oldname,$newname) = @_;
+    my $c = fuse_get_context();
+    eval {$Self->create_symlink($oldname,$newname,$c->{uid},$c->{gid})};
+    return -ENOENT()  if $@ =~ /not found/;
+    return -ENOTDIR() if $@ =~ /invalid directory/;
+    return -EIO()     if $@;
+    return 0;
+}
+
+sub e_readlink {
+    my $path = shift;
+    my $link = eval {$Self->read_symlink($path)};
+    return -ENOENT()  if $@ =~ /not found/;
+    return $link;
+}
+
 sub e_unlink {
     my $path = shift;
     eval {$Self->unlink_file($path)};
@@ -176,6 +199,7 @@ sub dbh {
     return $self->{dbh} ||= DBI->connect($dsn,
 					 undef,undef,
 					 {RaiseError=>1,
+					  PrintError=>1,
 					  AutoCommit=>1}) or croak DBI->errstr;
 }
 
@@ -186,6 +210,7 @@ sub create_inode {
     $mode  = 0777 unless defined $mode;
     $mode |=  $type eq 'f' ? 0100000
              :$type eq 'd' ? 0040000
+             :$type eq 'l' ? 0120000
                            : 0100000;  # default
     $uid ||= 0;
     $gid ||= 0;
@@ -202,6 +227,20 @@ sub create_hardlink {
     my ($oldpath,$newpath) = @_;
     my $inode  = $self->path2inode($oldpath);
     $self->create_path($inode,$newpath);
+}
+
+sub create_symlink {
+    my $self = shift;
+    my ($oldpath,$newpath,$uid,$gid) = @_;
+    my $newnode= $self->create_inode_and_path($newpath,'l',0777,$uid,$gid);
+    $self->write($newpath,$oldpath);
+}
+
+sub read_symlink {
+    my $self   = shift;
+    my $path   = shift;
+    my $target = $self->read($path,MAX_PATH_LEN);
+    return $target;
 }
 
 # this links an inode to a path
@@ -325,7 +364,7 @@ END
     $ino or die $dbh->errstr;
 
     my $dev     = 0;
-    my $blksize = 1024;
+    my $blksize = 16384;
     my $blocks  = 1;
     return ($dev,$ino,$mode,$nlinks,$uid,$gid,0,$size,$atime,$mtime,$ctime,$blksize,$blocks);
 }
@@ -363,8 +402,8 @@ insert into data (inode,contents) values (?,?)
 END
 ;
     $sth->execute($inode,$data,$offset+1,length($data),$data) or die $dbh->errstr;
-    $self->_touch($inode);
-    1;
+#    $self->_touch($inode);
+    return length($data);
 }
 
 sub truncate {
