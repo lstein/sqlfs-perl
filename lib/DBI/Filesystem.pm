@@ -57,8 +57,12 @@ sub mount {
 	       getattr    => "$pkg\:\:e_getattr",
 	       read       => "$pkg\:\:e_read",
 	       write      => "$pkg\:\:e_write",
+	       truncate   => "$pkg\:\:e_truncate",
 	       mknod      => "$pkg\:\:e_mknod",
 	       mkdir      => "$pkg\:\:e_mkdir",
+	       rmdir      => "$pkg\:\:e_rmdir",
+	       link       => "$pkg\:\:e_link",
+	       unlink     => "$pkg\:\:e_unlink",
 	       utime      => "$pkg\:\:e_utime",
 	       threaded   => 0,
 	);
@@ -119,6 +123,41 @@ sub e_write {
     return $data;
 }
 
+sub e_truncate {
+    my ($path,$offset) = @_;
+    $path = fixup($path);
+    eval {$Self->truncate($path,$offset)};
+    return -ENOENT()  if $@ =~ /not found/;
+    return -EISDIR()  if $@ =~ /is a directory/;
+    return -EINVAL()  if $@ =~ /length beyond end of file/;
+    return 0;
+}
+
+sub e_link {
+    my ($oldname,$newname) = @_;
+    eval {$Self->create_hardlink($oldname,$newname)};
+    return -ENOENT()  if $@ =~ /not found/;
+    return -ENOTDIR() if $@ =~ /invalid directory/;
+    return 0;
+}
+
+sub e_unlink {
+    my $path = shift;
+    eval {$Self->unlink_file($path)};
+    return -ENOENT()  if $@ =~ /not found/;
+    return -EISDIR() if $@ =~ /is a directory/;
+    0;
+}
+
+sub e_rmdir {
+    my $path = shift;
+    eval {$Self->remove_dir($path)};
+    return -ENOENT()    if $@ =~ /not found/;
+    return -ENOTDIR()   if $@ =~ /not a directory/;
+    return -ENOTEMPTY() if $@ =~ /not empty/;
+    0;
+}
+
 sub e_utime {
     my ($path,$atime,$mtime) = @_;
     $path = fixup($path);
@@ -136,13 +175,13 @@ sub dbh {
     my $dsn  = $self->dsn;
     return $self->{dbh} ||= DBI->connect($dsn,
 					 undef,undef,
-					 {PrintError=>1,
+					 {RaiseError=>1,
 					  AutoCommit=>1}) or croak DBI->errstr;
 }
 
 sub create_inode {
     my $self        = shift;
-    my ($name,$type,$mode,$parent,$uid,$gid) = @_;
+    my ($type,$mode,$uid,$gid) = @_;
 
     $mode  = 0777 unless defined $mode;
     $mode |=  $type eq 'f' ? 0100000
@@ -153,42 +192,73 @@ sub create_inode {
 
     my $dbh = $self->dbh;
     my $sth = $dbh->prepare("insert into metadata (mode,uid,gid,mtime,ctime,atime) values(?,?,?,null,null,null)");
-    $name =~ s!/!_!g;
     $sth->execute($mode,$uid,$gid) or die $sth->errstr;
     $sth->finish;
-    my $inode = $dbh->last_insert_id(undef,undef,undef,undef);
-    $sth      = $dbh->prepare('insert into path (inode,name,parent) values (?,?,?)');
-    $sth->execute($inode,$name,$parent)           or die $sth->errstr;
-    $sth->finish;
-    return $inode;
+    return $dbh->last_insert_id(undef,undef,undef,undef);
 }
 
+sub create_hardlink {
+    my $self = shift;
+    my ($oldpath,$newpath) = @_;
+    my $inode  = $self->path2inode($oldpath);
+    $self->create_path($inode,$newpath);
+}
+
+# this links an inode to a path
 sub create_path {
     my $self = shift;
-    my ($path,$type,$mode,$uid,$gid) = @_;
+    my ($inode,$path) = @_;
+
     my $dir    = dirname($path);
     $dir       = '/' if $dir eq '.'; # work around funniness in dirname()
+    my $parent = $self->path2inode($dir) or die "invalid directory";
+
     my $base   = basename($path);
-    my $parent = $self->path2inode($dir) or return;
-    $self->create_inode($base,$type,$mode,$parent,$uid,$gid);
+    $base      =~ s!/!_!g;
+
+    my $dbh  = $self->dbh;
+    my $sth  = $dbh->prepare('insert into path (inode,name,parent) values (?,?,?)');
+    $sth->execute($inode,$base,$parent)           or die $sth->errstr;
+    $sth->finish;
+
+    $dbh->do("update metadata set links=links+1 where inode=$inode");
+}
+
+sub create_inode_and_path {
+    my $self = shift;
+    my ($path,$type,$mode,$uid,$gid) = @_;
+    my $dbh    = $self->dbh;
+    my $inode;
+    eval {
+	$dbh->begin_work;
+	$inode  = $self->create_inode($type,$mode,$uid,$gid);
+	$self->create_path($inode,$path);
+	$dbh->commit;
+    };
+    $dbh->rollback() if $@;
+    return $inode;
 }
 
 sub create_file { 
     my $self = shift;
     my ($path,$mode,$uid,$gid) = @_;
-    $self->create_path($path,'f',$mode,$uid,$gid);
+    $self->create_inode_and_path($path,'f',$mode,$uid,$gid);
 }
 
 sub create_directory {
     my $self = shift;
     my ($path,$mode,$uid,$gid) = @_;    
-    $self->create_path($path,'d',$mode,$uid,$gid);
+    $self->create_inode_and_path($path,'d',$mode,$uid,$gid);
 }
 
 sub unlink_file {
     my $self  = shift;
     my $path  = shift;
     my ($inode,$parent,$name)  = $self->path2inode($path) ;
+
+    $parent ||= 1;
+    $name   ||= basename($path);
+
     $self->_isdir($inode)               and croak "$path is a directory";
     my $dbh                    = $self->dbh;
     my $sth                    = $dbh->prepare("delete from path where inode=? and parent=? and name=?") 
@@ -242,9 +312,9 @@ sub stat {
     my $path         = shift;
     my $inode        = $self->path2inode($path);
     my $dbh          = $self->dbh;
-    my ($ino,$mode,$uid,$gid,$ctime,$mtime,$atime,$size) =
+    my ($ino,$mode,$uid,$gid,$nlinks,$ctime,$mtime,$atime,$size) =
 	$dbh->selectrow_array(<<END);
-select n.inode,mode,uid,gid,
+select n.inode,mode,uid,gid,links,
        unix_timestamp(ctime),unix_timestamp(mtime),unix_timestamp(atime),
        if(isnull(contents),0,length(contents))
  from metadata as n
@@ -255,7 +325,6 @@ END
     $ino or die $dbh->errstr;
 
     my $dev     = 0;
-    my $nlinks  = 1;  # fix this later
     my $blksize = 1024;
     my $blocks  = 1;
     return ($dev,$ino,$mode,$nlinks,$uid,$gid,0,$size,$atime,$mtime,$ctime,$blksize,$blocks);
@@ -298,6 +367,30 @@ END
     1;
 }
 
+sub truncate {
+    my $self = shift;
+    my ($path,$length) = @_;
+
+    my $inode = $self->path2inode($path);
+    $self->_isdir($inode) and croak "$path is a directory";
+
+    my $dbh    = $self->dbh;
+    $length  ||= 0;
+
+    # check that length isn't greater than current position
+    my @stat   = $self->stat($path);
+    $stat[7] >= $length or croak "length beyond end of file";
+
+    my $sth = $dbh->prepare(<<END) or die $dbh->errstr;
+update data set contents=substr(contents,1,?) where inode=?
+END
+;
+
+    $sth->execute($length,$inode) or die $dbh->errstr;
+    $self->_touch($inode);
+    1;
+}
+
 sub isdir {
     my $self = shift;
     my $path = shift;
@@ -331,7 +424,6 @@ sub _touch {
 sub utime {
     my $self = shift;
     my ($path,$atime,$mtime) = @_;
-    warn "$path: atime=$atime, mtime=$mtime";
     my $inode = $self->path2inode($path) ;
     my $dbh    = $self->dbh;
     my $sth    = $dbh->prepare("update metadata set atime=from_unixtime(?),mtime=from_unixtime(?)");
@@ -361,6 +453,10 @@ sub _entries {
 sub path2inode {
     my $self   = shift;
     my $path   = shift;
+    if ($path eq '/') {
+	return wantarray ? (1,undef,'/') : 1;
+    }
+    $path =~ s!/$!!;
     my ($sql,@bind) = $self->_path2inode_sql($path);
     my $dbh    = $self->dbh;
     my $sth    = $dbh->prepare($sql) or croak $dbh->errstr;
@@ -372,19 +468,30 @@ sub path2inode {
 
 sub _path2inode_sql {
     my $self   = shift;
-    my ($path,$subselect)  = @_;
-    $path     =~ s!/$!!;
-    return ('select 1') if !$path;
-    my (undef,$dir,$base) = File::Spec->splitpath($path);
-    my ($parent,@base)    = $self->_path2inode_sql($dir,$subselect++); # something nicely recursive
-    my $fields            = $subselect ? 'm.inode' : 'm.inode,p.parent,p.name';
+    my $path   = shift;
+    my (undef,$dir,$name) = File::Spec->splitpath($path);
+    my ($parent,@base)    = $self->_path2inode_subselect($dir); # something nicely recursive
     my $sql               = <<END;
-select $fields from metadata as m,path as p 
+select p.inode,p.parent,p.name from metadata as m,path as p 
        where p.name=? and p.parent in ($parent) 
          and m.inode=p.inode
 END
 ;
-    return ($sql,$base,@base);
+    return ($sql,$name,@base);
+}
+
+sub _path2inode_subselect {
+    my $self = shift;
+    my $path = shift;
+    return 'select 1' if $path eq '/' or !length($path);
+    $path =~ s!/$!!;
+    my (undef,$dir,$name) = File::Spec->splitpath($path);
+    my ($parent,@base)    = $self->_path2inode_subselect($dir); # something nicely recursive
+    return (<<END,$name,@base);
+select p.inode from metadata as m,path as p
+    where p.name=? and p.parent in ($parent)
+    and m.inode=p.inode
+END
 }
 
 sub _initialize_schema {
@@ -399,7 +506,7 @@ create table metadata (
     mode         int(10)      not null,
     uid          int(10)      not null,
     gid          int(10)      not null,
-    links        int(10)      default 1,
+    links        int(10)      default 0,
     inuse        int(10)      default 0,
     mtime        timestamp,
     ctime        timestamp,

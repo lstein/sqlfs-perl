@@ -6,12 +6,15 @@ use lib "$Bin/../lib";
 use DBI::Filesystem;
 
 my $fs = DBI::Filesystem->new('dbi:mysql:filesystem;user=lstein;password=blah',1);
+$fs->stat('foo');
+$fs->create_directory('foo');
 $fs->create_directory('/one');
 $fs->create_directory('/one/subdirectory_one');
 $fs->create_directory('/two');
 $fs->create_directory('/two/subdirectory_two');
 $fs->create_directory('/two/subdirectory_two/subdirectory_two_two');
 $fs->create_directory('/three');
+$fs->create_file('/foo.mpg');
 $fs->create_file('/one/foo.mpg');
 $fs->create_file('/one/bar.mpg');
 $fs->create_file('/two/subdirectory_two/subdirectory_two_two/deep.mpg');
