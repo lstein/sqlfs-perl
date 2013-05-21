@@ -31,6 +31,8 @@ use File::Basename 'basename','dirname';
 use File::Spec;
 use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO);
 use Carp 'croak';
+use Symbol 'gensym';
+use IO::Handle;
 
 use constant MAX_PATH_LEN => 4096;  # characters
 use constant BLOCKSIZE    => 4096;  # bytes
@@ -56,9 +58,12 @@ sub mount {
 
     $Self = $self;  # because entrypoints cannot be passed as closures
     Fuse::main(mountpoint => $mtpt,
-	       mountopts  => '',
+	       mountopts  => 'hard_remove',
 	       getdir     => "$pkg\:\:e_getdir",
 	       getattr    => "$pkg\:\:e_getattr",
+	       fgetattr   => "$pkg\:\:e_fgetattr",
+	       open       => "$pkg\:\:e_open",
+	       release    => "$pkg\:\:e_release",
 	       read       => "$pkg\:\:e_read",
 	       write      => "$pkg\:\:e_write",
 	       truncate   => "$pkg\:\:e_truncate",
@@ -70,13 +75,15 @@ sub mount {
 	       readlink   => "$pkg\:\:e_readlink",
 	       unlink     => "$pkg\:\:e_unlink",
 	       utime      => "$pkg\:\:e_utime",
-	       debug      => 0,
+	       nullpath_ok => 1,
+	       debug      => 1,
 	       threaded   => 1,
 	);
 }
 
 sub fixup {
     my $path = shift;
+    no warnings;
     $path    =~ s!^/!!;
     $path   || '/';
 }
@@ -92,6 +99,13 @@ sub e_getdir {
 sub e_getattr {
     my $path  = fixup(shift);
     my @stat  = eval {$Self->stat($path)};
+    return -ENOENT()  if $@ =~ /not found/;
+    return @stat;
+}
+
+sub e_fgetattr {
+    my ($path,$inode) = @_;
+    my @stat  = eval {$Self->fstat(fixup($path),$inode)};
     return -ENOENT()  if $@ =~ /not found/;
     return @stat;
 }
@@ -112,19 +126,34 @@ sub e_mknod {
     0;
 }
 
-sub e_read {
-    my ($path,$size,$offset) = @_;
+sub e_open {
+    my ($path,$flags,$info) = @_;
     $path    = fixup($path);
-    my $data = eval {$Self->read($path,$size,$offset)};
+    my $fh = eval {$Self->open($path,$flags,$info)};
+    return -ENOENT() if $@ =~ /not found/;
+    (0,$fh);
+}
+
+sub e_release {
+    my ($path,$flags,$fh) = @_;
+    $Self->release($fh);
+    return 0;
+}
+ 
+
+sub e_read {
+    my ($path,$size,$offset,$fh) = @_;
+    $path    = fixup($path);
+    my $data = eval {$Self->read($path,$fh,$size,$offset)};
     return -ENOENT()  if $@ =~ /not found/;
     return -EISDIR()  if $@ =~ /is a directory/;
     return $data;
 }
 
 sub e_write {
-    my ($path,$buffer,$size,$offset) = @_;
+    my ($path,$buffer,$offset,$fh) = @_;
     $path    = fixup($path);
-    my $data = eval {$Self->write($path,$buffer,$size,$offset)};
+    my $data = eval {$Self->write($path,$fh,$buffer,$offset)};
     return -ENOENT()  if $@ =~ /not found/;
     return -EISDIR()  if $@ =~ /is a directory/;
     return $data;
@@ -306,10 +335,18 @@ sub unlink_file {
     $sth->execute($inode,$parent,$name) or die $dbh->errstr;
 
     $dbh->do("update metadata set links=links-1 where inode=$inode");
-    my ($links,$inuse) = $dbh->selectrow_array("select links,inuse from metadata where inode=$inode");
-    if ($links <=0 && $inuse<=0) {
-	$dbh->do("delete from metadata where inode=$inode") or die $dbh->errstr;
-    }
+    $self->unlink_inode($inode);
+}
+
+sub unlink_inode {
+    my $self = shift;
+    my $inode = shift;
+    my $dbh   = $self->dbh;
+    my ($references) = $dbh->selectrow_array("select links+inuse from metadata where inode=$inode");
+    warn "references = $references";
+    return if $references > 0;
+    $dbh->do("delete from metadata where inode=$inode") or die $dbh->errstr;
+    $dbh->do("delete from data     where inode=$inode") or die $dbh->errstr;
 }
 
 sub remove_dir {
@@ -320,7 +357,9 @@ sub remove_dir {
     $self->_entries($inode )            and croak "$path is not empty";
 
     my $dbh   = $self->dbh;
-    $dbh->do("delete from path where inode=$inode") or die $dbh->errstr;
+    $dbh->do("update metadata set links=links-1 where inode=$inode");
+    $dbh->do("delete from path where inode=$inode");
+    $self->unlink_inode($inode);
 }    
 
 sub chown {
@@ -347,10 +386,10 @@ sub chmod {
     return $dbh->do("update metadata set mode=((0xf000&mode)|$mode) where inode=$inode");
 }
 
-sub stat {
-    my $self         = shift;
-    my $path         = shift;
-    my $inode        = $self->path2inode($path);
+sub fstat {
+    my $self  = shift;
+    my ($path,$inode) = @_;
+    $inode ||= $self->path2inode;
     my $dbh          = $self->dbh;
     my ($ino,$mode,$uid,$gid,$nlinks,$ctime,$mtime,$atime,$size) =
 	$dbh->selectrow_array(<<END);
@@ -370,12 +409,22 @@ END
     return ($dev,$ino,$mode,$nlinks,$uid,$gid,0,$size,$atime,$mtime,$ctime,$blksize,$blocks);
 }
 
+sub stat {
+    my $self         = shift;
+    my $path         = shift;
+    my $inode        = $self->path2inode($path);
+    return $self->fstat($path,$inode);
+}
+
 sub read {
     my $self = shift;
-    my ($path,$length,$offset) = @_;
+    my ($path,$inode,$length,$offset) = @_;
 
-    my $inode  = $self->path2inode($path);
-    $self->_isdir($inode) and croak "$path is a directory";
+    warn "read (inode=$inode)";
+    unless ($inode) {
+	$inode  = $self->path2inode($path);
+	$self->_isdir($inode) and croak "$path is a directory";
+    }
     $offset  ||= 0;
 
     my $first_block = int($offset / BLOCKSIZE);
@@ -410,12 +459,31 @@ sub file_length {
     return $current_length;
 }
 
+sub open {
+    my ($self,$path,$flags,$info) = @_;
+    my $inode  = $self->path2inode($path);
+    warn "open()";
+    $self->dbh->do("update metadata set inuse=inuse+1 where inode=$inode");
+    return $inode;
+}
+
+sub release {
+    my ($self,$inode) = @_;
+    warn "release()";
+    my $dbh = $self->dbh;
+    $dbh->do("update metadata set inuse=inuse-1 where inode=$inode");
+    $self->unlink_inode($inode);
+    return 0;
+}
+
 sub write {
     my $self = shift;
-    my ($path,$data,$offset) = @_;
+    my ($path,$inode,$data,$offset) = @_;
 
-    my $inode  = $self->path2inode($path);
-    $self->_isdir($inode) and croak "$path is a directory";
+    unless ($inode) {
+	$inode  = $self->path2inode($path);
+	$self->_isdir($inode) and croak "$path is a directory";
+    }
 
     my $dbh    = $self->dbh;
     $offset  ||= 0;
