@@ -33,6 +33,7 @@ use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO);
 use Carp 'croak';
 
 use constant MAX_PATH_LEN => 4096;  # characters
+use constant BLOCKSIZE    => 4096;  # bytes
 
 sub new {
     my $class = shift;
@@ -355,7 +356,7 @@ sub stat {
 	$dbh->selectrow_array(<<END);
 select n.inode,mode,uid,gid,links,
        unix_timestamp(ctime),unix_timestamp(mtime),unix_timestamp(atime),
-       if(isnull(contents),0,length(contents))
+       length
  from metadata as n
  left join data as c on (n.inode=c.inode)
  where n.inode=$inode
@@ -375,11 +376,38 @@ sub read {
 
     my $inode  = $self->path2inode($path);
     $self->_isdir($inode) and croak "$path is a directory";
-    my $dbh    = $self->dbh;
     $offset  ||= 0;
-    $offset++;  # sql uses 1-based string indexing
-    my ($data) = $dbh->selectrow_array("select substring(contents,$offset,$length) from data where inode=$inode");
+
+    my $first_block = int($offset / BLOCKSIZE);
+    my $last_block  = int(($offset+$length) / BLOCKSIZE);
+    my $start       = $offset % BLOCKSIZE;
+    my $data = '';
+    
+    my $current_length = $self->file_length($inode);
+    if ($length+$offset > $current_length) {
+	$length = $current_length - $offset;
+    }
+
+    my $dbh = $self->dbh;
+    my $sth = $dbh->prepare_cached("select block,contents from data where inode=? and block between ? and ?");
+    $sth->execute($inode,$first_block,$last_block);
+    while (my ($block,$contents) = $sth->fetchrow_array) {
+	if (length $contents < BLOCKSIZE && $block < $last_block) {
+	    $contents .= "\0"x(BLOCKSIZE-length($contents));  # this is a hole!
+	}
+	$data   .= substr($contents,$start,$length);
+	$length -= BLOCKSIZE;
+    }
+    $sth->finish;
     return $data;
+}
+
+sub file_length {
+    my $self = shift;
+    my $inode = shift;
+    my $dbh   = $self->dbh;
+    my ($current_length) = $dbh->selectrow_array("select length from metadata where inode=$inode");
+    return $current_length;
 }
 
 sub write {
@@ -392,18 +420,40 @@ sub write {
     my $dbh    = $self->dbh;
     $offset  ||= 0;
 
-    # check that offset isn't greater than current position
-    my @stat   = $self->stat($path);
-    $stat[7] >= $offset or croak "offset beyond end of file";
+    my $first_block = int($offset / BLOCKSIZE);
+    my $start       = $offset % BLOCKSIZE;
+
+    my $block          = $first_block;
+    my $bytes_to_write = length $data;
+    my $bytes_written  = 0;
+
+    my $current_length = $self->file_length($inode);
 
     my $sth = $dbh->prepare(<<END) or die $dbh->errstr;
-insert into data (inode,contents) values (?,?)
+insert into data (inode,block,contents) values (?,?,?)
  on duplicate key update contents=insert(contents,?,?,?)
 END
 ;
-    $sth->execute($inode,$data,$offset+1,length($data),$data) or die $dbh->errstr;
-#    $self->_touch($inode);
-    return length($data);
+    while ($bytes_to_write > 0) {
+	my $bytes    = BLOCKSIZE > ($bytes_to_write+$start) ? $bytes_to_write : (BLOCKSIZE-$start);
+	my $padding  = "\0" x ($start-$current_length%BLOCKSIZE) if $start > 0;
+	$padding    ||= '';
+	$start -= length($padding);
+	print STDERR "block $block, writing $bytes bytes from $start\n";
+	$sth->execute($inode,$block,substr($data,$bytes_written,$bytes),
+		      $start+1,$bytes,substr($padding.$data,$bytes_written,$bytes+length($padding))) or die $dbh->errstr;
+	$start  = 0;
+	$block++;
+	$bytes_written  += $bytes;
+	$bytes_to_write -= $bytes;
+    }
+
+    $sth->finish;
+    my $final_length = $offset + $bytes_written;
+    $final_length    = $current_length if $final_length < $current_length;
+    $dbh->do("update metadata set length=$final_length where inode=$inode");
+
+    return $bytes_written;
 }
 
 sub truncate {
@@ -420,13 +470,19 @@ sub truncate {
     my @stat   = $self->stat($path);
     $stat[7] >= $length or croak "length beyond end of file";
 
-    my $sth = $dbh->prepare(<<END) or die $dbh->errstr;
-update data set contents=substr(contents,1,?) where inode=?
-END
-;
-
-    $sth->execute($length,$inode) or die $dbh->errstr;
-    $self->_touch($inode);
+    my $last_block = int($length/BLOCKSIZE);
+    my $trunc      = $length % BLOCKSIZE;
+    eval {
+	$dbh->begin_work;
+	$dbh->do("delete from data where inode=$inode and block>$last_block");
+	$dbh->do("update data set contents=substr(contents,1,$trunc) where inode=$inode and block=$last_block");
+	$dbh->do("update metadata set length=$length where inode=$inode");
+	$dbh->commit;
+    };
+    if ($@) {
+	$dbh->rollback();
+	die "Couldn't update because $@";
+    }
     1;
 }
 
@@ -547,6 +603,7 @@ create table metadata (
     gid          int(10)      not null,
     links        int(10)      default 0,
     inuse        int(10)      default 0,
+    length       bigint       default 0,
     mtime        timestamp,
     ctime        timestamp,
     atime        timestamp
@@ -564,8 +621,10 @@ END
     ;
     $dbh->do(<<END)                       or croak $dbh->errstr;
 create table data (
-    inode        int(10)      primary key,
-    contents     longblob
+    inode        int(10),
+    block        int(10),
+    contents     longblob,
+    unique index iblock (inode,block)
 )
 END
 ;

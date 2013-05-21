@@ -6,7 +6,6 @@ use lib "$Bin/../lib";
 use DBI::Filesystem;
 
 my $fs = DBI::Filesystem->new('dbi:mysql:filesystem;user=lstein;password=blah',1);
-$fs->stat('foo');
 $fs->create_directory('foo');
 $fs->create_directory('/one');
 $fs->create_directory('/one/subdirectory_one');
@@ -27,8 +26,12 @@ print join ',',$fs->entries('/two/subdirectory_two/subdirectory_two_two'),"\n";
 my @stat = $fs->stat('/two/subdirectory_two/subdirectory_two_two/deep.mpg');
 print join(",",@stat),"\n";
 
-$fs->write('/two/subdirectory_two/subdirectory_two_two/deep.mpg','this old man had a frog in his throat');
-print $fs->read('/two/subdirectory_two/subdirectory_two_two/deep.mpg',0,10),"\n";
+$fs->write('/two/subdirectory_two/subdirectory_two_two/deep.mpg','this old man had a frog in his throat',0);
+$fs->write('/two/subdirectory_two/subdirectory_two_two/deep.mpg',' and more is here',37);
+my $length = ($fs->stat('/two/subdirectory_two/subdirectory_two_two/deep.mpg'))[7];
+$fs->write('/two/subdirectory_two/subdirectory_two_two/deep.mpg','this should have two zeroes interpolated',$length+2);
+$fs->write('/two/subdirectory_two/subdirectory_two_two/deep.mpg',scalar('.'x(4096*2+10)),96);
+print $fs->read('/two/subdirectory_two/subdirectory_two_two/deep.mpg',10,0),"\n";
 print $fs->write('/two/subdirectory_two/subdirectory_two_two/deep.mpg','everyone',5),"\n";
 
 print eval{$fs->remove_dir('/one/subdirectory_one')},"\n";
