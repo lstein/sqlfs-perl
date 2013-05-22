@@ -76,6 +76,9 @@ sub mount {
 	       mkdir       => "$pkg\:\:e_mkdir",
 	       rmdir       => "$pkg\:\:e_rmdir",
 	       link        => "$pkg\:\:e_link",
+	       rename      => "$pkg\:\:e_rename",
+	       chmod       => "$pkg\:\:e_chmod",
+	       chown       => "$pkg\:\:e_chown",
 	       symlink     => "$pkg\:\:e_symlink",
 	       readlink    => "$pkg\:\:e_readlink",
 	       unlink      => "$pkg\:\:e_unlink",
@@ -96,22 +99,21 @@ sub fixup {
 sub e_getdir {
     my $path = fixup(shift);
     my @entries = eval {$Self->entries($path)};
-    return -ENOENT()  if $@ =~ /not found/;
-    return -ENOTDIR() if $@ =~ /not directory/;
+    return $Self->errno($@) if $@;
     return (@entries,0);
 }
 
 sub e_getattr {
     my $path  = fixup(shift);
     my @stat  = eval {$Self->stat($path)};
-    return -ENOENT()  if $@ =~ /not found/;
+    return $Self->errno($@) if $@;
     return @stat;
 }
 
 sub e_fgetattr {
     my ($path,$inode) = @_;
     my @stat  = eval {$Self->fstat(fixup($path),$inode)};
-    return -ENOENT()  if $@ =~ /not found/;
+    return $Self->errno($@) if $@;
     return @stat;
 }
 
@@ -119,7 +121,7 @@ sub e_mkdir {
     my $path = fixup(shift);
     my $mode = shift;
     eval {$Self->create_directory($path,$mode,0,0)};
-    return -ENOENT() if $@ =~ /not found/;
+    return $Self->errno($@) if $@;
     0;
 }
 
@@ -127,7 +129,7 @@ sub e_mknod {
     my $path = fixup(shift);
     my ($mode,$device) = @_;
     eval {$Self->create_file($path,$mode,0,0)};
-    return -ENOENT() if $@ =~ /not found/;
+    return $Self->errno($@) if $@;
     0;
 }
 
@@ -135,7 +137,7 @@ sub e_open {
     my ($path,$flags,$info) = @_;
     $path    = fixup($path);
     my $fh = eval {$Self->open($path,$flags,$info)};
-    return -ENOENT() if $@ =~ /not found/;
+    return $Self->errno($@) if $@;
     (0,$fh);
 }
 
@@ -150,8 +152,7 @@ sub e_read {
     my ($path,$size,$offset,$fh) = @_;
     $path    = fixup($path);
     my $data = eval {$Self->read($path,$size,$offset,$fh)};
-    return -ENOENT()  if $@ =~ /not found/;
-    return -EISDIR()  if $@ =~ /is a directory/;
+    return $Self->errno($@) if $@;
     return $data;
 }
 
@@ -159,8 +160,7 @@ sub e_write {
     my ($path,$buffer,$offset,$fh) = @_;
     $path    = fixup($path);
     my $data = eval {$Self->write($path,$buffer,$offset,$fh)};
-    return -ENOENT()  if $@ =~ /not found/;
-    return -EISDIR()  if $@ =~ /is a directory/;
+    return $Self->errno($@) if $@;
     return $data;
 }
 
@@ -168,17 +168,38 @@ sub e_truncate {
     my ($path,$offset) = @_;
     $path = fixup($path);
     eval {$Self->truncate($path,$offset)};
-    return -ENOENT()  if $@ =~ /not found/;
-    return -EISDIR()  if $@ =~ /is a directory/;
-    return -EINVAL()  if $@ =~ /length beyond end of file/;
+    return $Self->errno($@) if $@;
     return 0;
 }
 
 sub e_link {
     my ($oldname,$newname) = @_;
     eval {$Self->create_hardlink($oldname,$newname)};
-    return -ENOENT()  if $@ =~ /not found/;
-    return -ENOTDIR() if $@ =~ /invalid directory/;
+    return $Self->errno($@) if $@;
+    return 0;
+}
+
+sub e_rename {
+    my ($oldname,$newname) = @_;
+    eval {
+	$Self->create_hardlink($oldname,$newname);
+	$Self->unlink_file($oldname);
+    };
+    return $Self->errno($@) if $@;
+    return 0;
+}
+
+sub e_chmod {
+    my ($path,$mode) = @_;
+    eval {$Self->chmod($path,$mode)};
+    return $Self->errno($@) if $@;
+    return 0;
+}
+
+sub e_chown {
+    my ($path,$uid,$gid) = @_;
+    eval {$Self->chown($path,$uid,$gid)};
+    return $Self->errno($@) if $@;
     return 0;
 }
 
@@ -186,42 +207,36 @@ sub e_symlink {
     my ($oldname,$newname) = @_;
     my $c = fuse_get_context();
     eval {$Self->create_symlink($oldname,$newname,$c->{uid},$c->{gid})};
-    return -ENOENT()  if $@ =~ /not found/;
-    return -ENOTDIR() if $@ =~ /invalid directory/;
-    return -EIO()     if $@;
+    return $Self->errno($@) if $@;
     return 0;
 }
 
 sub e_readlink {
     my $path = shift;
     my $link = eval {$Self->read_symlink($path)};
-    return -ENOENT()  if $@ =~ /not found/;
+    return $Self->errno($@) if $@;
     return $link;
 }
 
 sub e_unlink {
     my $path = shift;
     eval {$Self->unlink_file($path)};
-    return -ENOENT()  if $@ =~ /not found/;
-    return -EISDIR() if $@ =~ /is a directory/;
-    0;
+    return $Self->errno($@) if $@;
+    return 0;
 }
 
 sub e_rmdir {
     my $path = shift;
     eval {$Self->remove_dir($path)};
-    return -ENOENT()    if $@ =~ /not found/;
-    return -ENOTDIR()   if $@ =~ /not a directory/;
-    return -ENOTEMPTY() if $@ =~ /not empty/;
-    0;
+    return $Self->errno($@) if $@;
+    return 0;
 }
 
 sub e_utime {
     my ($path,$atime,$mtime) = @_;
     $path = fixup($path);
     my $result = eval {$Self->utime($path,$atime,$mtime)};
-    return -ENOENT()  if $@ =~ /not found/;
-    return -EIO()     unless $result;
+    return $Self->errno($@) if $@;
     return 0;
 }
 
@@ -369,19 +384,11 @@ sub remove_dir {
 }    
 
 sub chown {
-    my $self         = shift;
-    my ($path,$uid)  = @_;
-    my $inode        = $self->path2inode($path) ;
-    my $dbh          = $self->dbh;
-    return $dbh->do("update metadata set uid=$uid where inode=$inode");
-}
-
-sub chgrp {
-    my $self         = shift;
-    my ($path,$gid)  = @_;
-    my $inode        = $self->path2inode($path) ;
-    my $dbh          = $self->dbh;
-    return $dbh->do("update metadata set gid=$gid where inode=$inode");
+    my $self              = shift;
+    my ($path,$uid,$gid)  = @_;
+    my $inode             = $self->path2inode($path) ;
+    my $dbh               = $self->dbh;
+    return $dbh->do("update metadata set uid=$uid,gid=$gid where inode=$inode");
 }
 
 sub chmod {
@@ -520,7 +527,7 @@ sub write {
 
     while ($bytes_to_write > 0) {
 	my $bytes          = BLOCKSIZE > ($bytes_to_write+$start) ? $bytes_to_write : (BLOCKSIZE-$start);
-	my $current_length = length($blocks->{$block})||0;
+	my $current_length = length($blocks->{$block}||'');
 
 	if ($bytes < BLOCKSIZE && !$current_length) {  # partial block replacement, and not currently cached
 	    my $sth = $self->dbh->prepare_cached('select contents,length(contents) from data where inode=? and block=?');
@@ -691,6 +698,17 @@ sub _entries {
     return @$col;
 }
 
+sub errno {
+    my $self = shift;
+    my $message = shift;
+    return -ENOENT()    if $@ =~ /not found/;
+    return -EISDIR()    if $@ =~ /is a directory/;
+    return -ENOTDIR()   if $@ =~ /not a directory/;
+    return -EINVAL()    if $@ =~ /length beyond end of file/;
+    return -ENOTEMPTY() if $@ =~ /not empty/;
+    return -EIO()       if $@;
+}
+
 # in scalar context return inode
 # in list context return (inode,parent_inode,name)
 sub path2inode {
@@ -735,6 +753,7 @@ select p.inode from metadata as m,path as p
     where p.name=? and p.parent in ($parent)
     and m.inode=p.inode
 END
+;
 }
 
 sub _initialize_schema {
