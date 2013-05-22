@@ -28,11 +28,14 @@ print join(",",@stat),"\n";
 
 $fs->write('/two/subdirectory_two/subdirectory_two_two/deep.mpg','this old man had a frog in his throat',0);
 $fs->write('/two/subdirectory_two/subdirectory_two_two/deep.mpg',' and more is here',37);
+$fs->flush();
 my $length = ($fs->stat('/two/subdirectory_two/subdirectory_two_two/deep.mpg'))[7];
 $fs->write('/two/subdirectory_two/subdirectory_two_two/deep.mpg','this should have two zeroes interpolated',$length+2);
 $fs->write('/two/subdirectory_two/subdirectory_two_two/deep.mpg',scalar('.'x(4096*2+10)),96);
+$fs->flush();
 print $fs->read('/two/subdirectory_two/subdirectory_two_two/deep.mpg',10,0),"\n";
 print $fs->write('/two/subdirectory_two/subdirectory_two_two/deep.mpg','everyone',5),"\n";
+$fs->flush();
 
 print eval{$fs->remove_dir('/one/subdirectory_one')},"\n";
 print eval{$fs->remove_dir('/two/subdirectory_two')},"\n";

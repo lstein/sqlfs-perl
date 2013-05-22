@@ -36,11 +36,16 @@ use IO::Handle;
 
 use constant MAX_PATH_LEN => 4096;  # characters
 use constant BLOCKSIZE    => 4096;  # bytes
+use constant FLUSHBLOCKS  => 64;    # flush after we've accumulated this many cached blocks
+
+my %Blockbuff :shared;
 
 sub new {
     my $class = shift;
     my ($dsn,$create) = @_;
-    my $self  = bless {dsn=>$dsn},ref $class || $class;
+    my $self  = bless {
+	dsn          => $dsn,
+    },ref $class || $class;
     local $self->{dbh};  # to avoid cloning database handle into child threads
     $self->_initialize_schema if $create;
     return $self;
@@ -58,26 +63,26 @@ sub mount {
 
     $Self = $self;  # because entrypoints cannot be passed as closures
     Fuse::main(mountpoint => $mtpt,
-	       mountopts  => 'hard_remove',
-	       getdir     => "$pkg\:\:e_getdir",
-	       getattr    => "$pkg\:\:e_getattr",
-	       fgetattr   => "$pkg\:\:e_fgetattr",
-	       open       => "$pkg\:\:e_open",
-	       release    => "$pkg\:\:e_release",
-	       read       => "$pkg\:\:e_read",
-	       write      => "$pkg\:\:e_write",
-	       truncate   => "$pkg\:\:e_truncate",
-	       mknod      => "$pkg\:\:e_mknod",
-	       mkdir      => "$pkg\:\:e_mkdir",
-	       rmdir      => "$pkg\:\:e_rmdir",
-	       link       => "$pkg\:\:e_link",
-	       symlink    => "$pkg\:\:e_symlink",
-	       readlink   => "$pkg\:\:e_readlink",
-	       unlink     => "$pkg\:\:e_unlink",
-	       utime      => "$pkg\:\:e_utime",
+	       mountopts   => 'hard_remove',
+	       getdir      => "$pkg\:\:e_getdir",
+	       getattr     => "$pkg\:\:e_getattr",
+	       fgetattr    => "$pkg\:\:e_fgetattr",
+	       open        => "$pkg\:\:e_open",
+	       release     => "$pkg\:\:e_release",
+	       read        => "$pkg\:\:e_read",
+	       write       => "$pkg\:\:e_write",
+	       truncate    => "$pkg\:\:e_truncate",
+	       mknod       => "$pkg\:\:e_mknod",
+	       mkdir       => "$pkg\:\:e_mkdir",
+	       rmdir       => "$pkg\:\:e_rmdir",
+	       link        => "$pkg\:\:e_link",
+	       symlink     => "$pkg\:\:e_symlink",
+	       readlink    => "$pkg\:\:e_readlink",
+	       unlink      => "$pkg\:\:e_unlink",
+	       utime       => "$pkg\:\:e_utime",
 	       nullpath_ok => 1,
-	       debug      => 1,
-	       threaded   => 1,
+	       debug       => 0,
+	       threaded    => 1,
 	);
 }
 
@@ -144,7 +149,7 @@ sub e_release {
 sub e_read {
     my ($path,$size,$offset,$fh) = @_;
     $path    = fixup($path);
-    my $data = eval {$Self->read($path,$fh,$size,$offset)};
+    my $data = eval {$Self->read($path,$size,$offset,$fh)};
     return -ENOENT()  if $@ =~ /not found/;
     return -EISDIR()  if $@ =~ /is a directory/;
     return $data;
@@ -153,7 +158,7 @@ sub e_read {
 sub e_write {
     my ($path,$buffer,$offset,$fh) = @_;
     $path    = fixup($path);
-    my $data = eval {$Self->write($path,$fh,$buffer,$offset)};
+    my $data = eval {$Self->write($path,$buffer,$offset,$fh)};
     return -ENOENT()  if $@ =~ /not found/;
     return -EISDIR()  if $@ =~ /is a directory/;
     return $data;
@@ -229,7 +234,6 @@ sub dbh {
     return $self->{dbh} ||= DBI->connect($dsn,
 					 undef,undef,
 					 {RaiseError=>1,
-					  PrintError=>1,
 					  AutoCommit=>1}) or croak DBI->errstr;
 }
 
@@ -246,7 +250,7 @@ sub create_inode {
     $gid ||= 0;
 
     my $dbh = $self->dbh;
-    my $sth = $dbh->prepare("insert into metadata (mode,uid,gid,mtime,ctime,atime) values(?,?,?,null,null,null)");
+    my $sth = $dbh->prepare_cached("insert into metadata (mode,uid,gid,mtime,ctime,atime) values(?,?,?,null,null,null)");
     $sth->execute($mode,$uid,$gid) or die $sth->errstr;
     $sth->finish;
     return $dbh->last_insert_id(undef,undef,undef,undef);
@@ -286,7 +290,7 @@ sub create_path {
     $base      =~ s!/!_!g;
 
     my $dbh  = $self->dbh;
-    my $sth  = $dbh->prepare('insert into path (inode,name,parent) values (?,?,?)');
+    my $sth  = $dbh->prepare_cached('insert into path (inode,name,parent) values (?,?,?)');
     $sth->execute($inode,$base,$parent)           or die $sth->errstr;
     $sth->finish;
 
@@ -304,7 +308,10 @@ sub create_inode_and_path {
 	$self->create_path($inode,$path);
 	$dbh->commit;
     };
-    $dbh->rollback() if $@;
+    if ($@) {
+	warn "commit failed due to $@";
+	eval{$dbh->rollback()};
+    }
     return $inode;
 }
 
@@ -330,7 +337,7 @@ sub unlink_file {
 
     $self->_isdir($inode)               and croak "$path is a directory";
     my $dbh                    = $self->dbh;
-    my $sth                    = $dbh->prepare("delete from path where inode=? and parent=? and name=?") 
+    my $sth                    = $dbh->prepare_cached("delete from path where inode=? and parent=? and name=?") 
 	or die $dbh->errstr;
     $sth->execute($inode,$parent,$name) or die $dbh->errstr;
 
@@ -343,7 +350,6 @@ sub unlink_inode {
     my $inode = shift;
     my $dbh   = $self->dbh;
     my ($references) = $dbh->selectrow_array("select links+inuse from metadata where inode=$inode");
-    warn "references = $references";
     return if $references > 0;
     $dbh->do("delete from metadata where inode=$inode") or die $dbh->errstr;
     $dbh->do("delete from data     where inode=$inode") or die $dbh->errstr;
@@ -418,13 +424,13 @@ sub stat {
 
 sub read {
     my $self = shift;
-    my ($path,$inode,$length,$offset) = @_;
+    my ($path,$length,$offset,$inode) = @_;
 
-    warn "read (inode=$inode)";
     unless ($inode) {
 	$inode  = $self->path2inode($path);
 	$self->_isdir($inode) and croak "$path is a directory";
     }
+    $self->flush(undef,$inode);  # make sure all in-memory data written to database
     $offset  ||= 0;
 
     my $first_block = int($offset / BLOCKSIZE);
@@ -438,7 +444,7 @@ sub read {
     }
 
     my $dbh = $self->dbh;
-    my $sth = $dbh->prepare_cached("select block,contents from data where inode=? and block between ? and ?");
+    my $sth = $dbh->prepare_cached("select block,contents from data where inode=? and block between ? and ? order by block");
     $sth->execute($inode,$first_block,$last_block);
     while (my ($block,$contents) = $sth->fetchrow_array) {
 	if (length $contents < BLOCKSIZE && $block < $last_block) {
@@ -462,14 +468,13 @@ sub file_length {
 sub open {
     my ($self,$path,$flags,$info) = @_;
     my $inode  = $self->path2inode($path);
-    warn "open()";
     $self->dbh->do("update metadata set inuse=inuse+1 where inode=$inode");
     return $inode;
 }
 
 sub release {
     my ($self,$inode) = @_;
-    warn "release()";
+    $self->flush(undef,$inode);  # write cached blocks
     my $dbh = $self->dbh;
     $dbh->do("update metadata set inuse=inuse-1 where inode=$inode");
     $self->unlink_inode($inode);
@@ -478,50 +483,113 @@ sub release {
 
 sub write {
     my $self = shift;
-    my ($path,$inode,$data,$offset) = @_;
+    my ($path,$data,$offset,$inode) = @_;
 
     unless ($inode) {
 	$inode  = $self->path2inode($path);
 	$self->_isdir($inode) and croak "$path is a directory";
     }
 
-    my $dbh    = $self->dbh;
     $offset  ||= 0;
 
-    my $first_block = int($offset / BLOCKSIZE);
-    my $start       = $offset % BLOCKSIZE;
+    my $first_block    = int($offset / BLOCKSIZE);
+    my $start          = $offset % BLOCKSIZE;
 
     my $block          = $first_block;
     my $bytes_to_write = length $data;
     my $bytes_written  = 0;
+    unless ($Blockbuff{$inode}) {
+	my %hash;
+	share (%hash);
+	$Blockbuff{$inode}=\%hash;
+    }
+    my $blocks         = $Blockbuff{$inode}; # blockno=>data
+    lock $blocks;
 
-    my $current_length = $self->file_length($inode);
-
-    my $sth = $dbh->prepare(<<END) or die $dbh->errstr;
-insert into data (inode,block,contents) values (?,?,?)
- on duplicate key update contents=insert(contents,?,?,?)
-END
-;
     while ($bytes_to_write > 0) {
-	my $bytes    = BLOCKSIZE > ($bytes_to_write+$start) ? $bytes_to_write : (BLOCKSIZE-$start);
-	my $padding  = "\0" x ($start-$current_length%BLOCKSIZE) if $start > 0;
-	$padding    ||= '';
-	$start -= length($padding);
-	print STDERR "block $block, writing $bytes bytes from $start\n";
-	$sth->execute($inode,$block,substr($data,$bytes_written,$bytes),
-		      $start+1,$bytes,substr($padding.$data,$bytes_written,$bytes+length($padding))) or die $dbh->errstr;
-	$start  = 0;
+	my $bytes          = BLOCKSIZE > ($bytes_to_write+$start) ? $bytes_to_write : (BLOCKSIZE-$start);
+	my $current_length = length($blocks->{$block})||0;
+
+	if ($bytes < BLOCKSIZE && !$current_length) {  # partial block replacement, and not currently cached
+	    my $sth = $self->dbh->prepare_cached('select contents,length(contents) from data where inode=? and block=?');
+	    $sth->execute($inode,$block);
+	    ($blocks->{$block},$current_length) = $sth->fetchrow_array();
+	    $current_length                   ||= 0;
+	    $sth->finish;
+	}
+
+	if ($start > $current_length) {  # hole in current block
+	    my $padding  = "\0" x ($start-$current_length);
+	    $padding   ||= '';
+	    $blocks->{$block} .= $padding;
+	}
+
+	if ($start) {
+	    substr($blocks->{$block},$start,$bytes,substr($data,$bytes_written,$bytes));
+	} else {
+	    $blocks->{$block} = substr($data,$bytes_written,$bytes);
+	}
+
+	$start = 0;  # no more offsets
 	$block++;
 	$bytes_written  += $bytes;
 	$bytes_to_write -= $bytes;
     }
-
-    $sth->finish;
-    my $final_length = $offset + $bytes_written;
-    $final_length    = $current_length if $final_length < $current_length;
-    $dbh->do("update metadata set length=$final_length where inode=$inode");
-
+    $self->flush(undef,$inode) if keys %$blocks > FLUSHBLOCKS;
     return $bytes_written;
+}
+
+sub flush {
+    my $self  = shift;
+    my ($path,$inode) = @_;
+
+    if ($path) {
+	$inode  ||= $self->path2inode($path);
+    }
+
+    # if called with no inode, then recursively call ourselves
+    # to flush all cached inodes
+    unless ($inode) {
+	for my $i (keys %{$self->{blockbuff}}) {
+	    $self->flush(undef,$i);
+	}
+	return;
+    }
+
+    my $blocks = $Blockbuff{$inode} or return;
+
+    lock $blocks;
+    my $length = $self->file_length($inode);
+    my $hwm = 0;  # high water mark ;-)
+
+    my $dbh = $self->dbh;
+
+    eval {
+	$dbh->begin_work;
+	my $sth = $dbh->prepare_cached(<<END) or die $dbh->errstr;
+insert into data (inode,block,contents) values (?,?,?)
+ on duplicate key update contents=?
+END
+;
+
+	for my $block (keys %$blocks) {
+	    my $data = $blocks->{$block};
+	    $sth->execute($inode,$block,$data,$data);
+	    my $a   = $block * BLOCKSIZE + length($data);
+	    $hwm    = $a if $a > $hwm;
+	}
+	$sth->finish;
+	$dbh->do("update metadata set length=$hwm where inode=$inode") if $hwm > $length;
+	$dbh->commit();
+    };
+
+    if ($@) {
+	warn "write failed with $@";
+	eval{$dbh->rollback()};
+	return;
+    }
+
+    %{$Blockbuff{$inode}} = ();
 }
 
 sub truncate {
@@ -548,7 +616,7 @@ sub truncate {
 	$dbh->commit;
     };
     if ($@) {
-	$dbh->rollback();
+	eval {$dbh->rollback()};
 	die "Couldn't update because $@";
     }
     1;
@@ -589,7 +657,7 @@ sub utime {
     my ($path,$atime,$mtime) = @_;
     my $inode = $self->path2inode($path) ;
     my $dbh    = $self->dbh;
-    my $sth    = $dbh->prepare("update metadata set atime=from_unixtime(?),mtime=from_unixtime(?)");
+    my $sth    = $dbh->prepare_cached("update metadata set atime=from_unixtime(?),mtime=from_unixtime(?)");
     my $result = $sth->execute($atime,$mtime);
     $sth->finish();
     return $result;
@@ -622,7 +690,7 @@ sub path2inode {
     $path =~ s!/$!!;
     my ($sql,@bind) = $self->_path2inode_sql($path);
     my $dbh    = $self->dbh;
-    my $sth    = $dbh->prepare($sql) or croak $dbh->errstr;
+    my $sth    = $dbh->prepare_cached($sql) or croak $dbh->errstr;
     $sth->execute(@bind);
     my @v      = $sth->fetchrow_array() or croak "$path not found";
     $sth->finish;
@@ -675,7 +743,7 @@ create table metadata (
     mtime        timestamp,
     ctime        timestamp,
     atime        timestamp
-)
+) ENGINE=INNODB
 END
 ;
     $dbh->do(<<END)                       or croak $dbh->errstr;
@@ -684,16 +752,16 @@ create table path (
     name         varchar(255) not null,
     parent       int(10),
     index path (parent,name)
-)
+) ENGINE=INNODB
 END
     ;
     $dbh->do(<<END)                       or croak $dbh->errstr;
 create table data (
     inode        int(10),
     block        int(10),
-    contents     longblob,
+    contents     blob,
     unique index iblock (inode,block)
-)
+) ENGINE=MYISAM
 END
 ;
     # create the root node
