@@ -36,7 +36,7 @@ use IO::Handle;
 
 use constant MAX_PATH_LEN => 4096;  # characters
 use constant BLOCKSIZE    => 4096;  # bytes
-use constant FLUSHBLOCKS  => 64;    # flush after we've accumulated this many cached blocks
+use constant FLUSHBLOCKS  => 32;    # flush after we've accumulated this many cached blocks
 
 my %Blockbuff :shared;
 
@@ -446,12 +446,24 @@ sub read {
     my $dbh = $self->dbh;
     my $sth = $dbh->prepare_cached("select block,contents from data where inode=? and block between ? and ? order by block");
     $sth->execute($inode,$first_block,$last_block);
+
+    my $previous_block;
     while (my ($block,$contents) = $sth->fetchrow_array) {
+	$previous_block = $block unless defined $previous_block;
+
+	# a hole spanning an entire block
+	if ($block - $previous_block > 1) {
+	    $data .= "\0"x(BLOCKSIZE*($block-$previous_block-1));
+	}
+	$previous_block = $block;
+
+	# a hole spanning a portion of a block
 	if (length $contents < BLOCKSIZE && $block < $last_block) {
 	    $contents .= "\0"x(BLOCKSIZE-length($contents));  # this is a hole!
 	}
-	$data   .= substr($contents,$start,$length);
-	$length -= BLOCKSIZE;
+	$data      .= substr($contents,$start,$length);
+	$length    -= BLOCKSIZE;
+	$start      = 0;
     }
     $sth->finish;
     return $data;
