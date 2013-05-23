@@ -556,9 +556,10 @@ sub check_perm {
     my $wants_read  = $flags & (O_RDWR|O_RDONLY);
     my $wants_write = $flags & (O_RDWR|O_WRONLY);
     $mode          &= 0777;
-    my $mask        = $uid==$owner ? $mode >> 6
-                     :$gid==$group ? $mode >> 3
-                     : $mode;
+    my $groups      = $self->{_group_cache}{$uid} ||= $self->_get_groups($uid,$gid);
+    my $mask        = $uid==$owner  ? $mode >> 6
+                     :$groups{$gid} ? $mode >> 3
+                     :$mode;
     return 0;
 }     
 
@@ -848,6 +849,19 @@ sub _initialize_schema {
 	or croak $dbh->errstr;
     $dbh->do("insert into path (inode,name,parent) values (1,'/',null)")
 	or croak $dbh->errstr;
+}
+
+sub _get_groups {
+    my $self = shift;
+    my ($uid,$gid) = @_;
+    my %result;
+    $result{$gid}++;
+    my $name = getpwuid($uid) or return \%result;
+    while (my($name,$id,$members) = getgrent) {
+	next unless $members =~ /\b$name\b/;
+	$result{$id}++;
+    }
+    return \%result;
 }
 
 1;
