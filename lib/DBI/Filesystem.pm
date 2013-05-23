@@ -29,7 +29,8 @@ use threads;
 use threads::shared;
 use File::Basename 'basename','dirname';
 use File::Spec;
-use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO);
+use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO
+             O_RDONLY O_WRONLY O_RDWR);
 use Carp 'croak';
 use Symbol 'gensym';
 use IO::Handle;
@@ -43,9 +44,11 @@ my %Blockbuff :shared;
 sub new {
     my $class = shift;
     my ($dsn,$create) = @_;
-    my $self  = bless {
-	dsn          => $dsn,
-    },ref $class || $class;
+    my ($dbd)         = $dsn =~ /dbi:([^:]+)/;
+    $dbd or croak "Could not figure out the DBI subclass to load from $dsn";
+    my $subclass = __PACKAGE__.'::'.$dbd;
+    eval "require $subclass;1" or croak $@  unless $subclass->can('new');
+    my $self  = bless {dsn          => $dsn},$subclass;
     local $self->{dbh};  # to avoid cloning database handle into child threads
     $self->_initialize_schema if $create;
     return $self;
@@ -62,7 +65,7 @@ sub mount {
     my $pkg  = __PACKAGE__;
 
     $Self = $self;  # because entrypoints cannot be passed as closures
-    Fuse::main(mountpoint => $mtpt,
+    Fuse::main(mountpoint  => $mtpt,
 	       mountopts   => 'hard_remove',
 	       getdir      => "$pkg\:\:e_getdir",
 	       getattr     => "$pkg\:\:e_getattr",
@@ -98,7 +101,7 @@ sub fixup {
 
 sub e_getdir {
     my $path = fixup(shift);
-    my @entries = eval {$Self->entries($path)};
+    my @entries = eval {$Self->getdir($path)};
     return $Self->errno($@) if $@;
     return (@entries,0);
 }
@@ -120,23 +123,28 @@ sub e_fgetattr {
 sub e_mkdir {
     my $path = fixup(shift);
     my $mode = shift;
-    eval {$Self->create_directory($path,$mode,0,0)};
+    my $ctx            = fuse_get_context;
+    my $umask          = $ctx->{umask};
+    eval {$Self->create_directory($path,$mode&(~$umask),$ctx->{uid},$ctx->{gid})};
     return $Self->errno($@) if $@;
-    0;
+    return 0;
 }
 
 sub e_mknod {
     my $path = fixup(shift);
     my ($mode,$device) = @_;
-    eval {$Self->create_file($path,$mode,0,0)};
+    my $ctx            = fuse_get_context;
+    my $umask          = $ctx->{umask};
+    eval {$Self->create_file($path,$mode&(~$umask),$ctx->{uid},$ctx->{gid})};
     return $Self->errno($@) if $@;
-    0;
+    return 0;
 }
 
 sub e_open {
     my ($path,$flags,$info) = @_;
     $path    = fixup($path);
-    my $fh = eval {$Self->open($path,$flags,$info)};
+    my $ctx  = fuse_get_context;
+    my $fh = eval {$Self->open($path,$flags,$info,$ctx->{uid},$ctx->{gid})};
     return $Self->errno($@) if $@;
     (0,$fh);
 }
@@ -265,8 +273,8 @@ sub create_inode {
     $gid ||= 0;
 
     my $dbh = $self->dbh;
-    my $sth = $dbh->prepare_cached("insert into metadata (mode,uid,gid,mtime,ctime,atime) values(?,?,?,null,null,null)");
-    $sth->execute($mode,$uid,$gid) or die $sth->errstr;
+    my $sth = $dbh->prepare_cached("insert into metadata (mode,uid,gid,links,mtime,ctime,atime) values(?,?,?,?,null,null,null)");
+    $sth->execute($mode,$uid,$gid,$type eq 'd' ? 1 : 0) or die $sth->errstr;
     $sth->finish;
     return $dbh->last_insert_id(undef,undef,undef,undef);
 }
@@ -310,6 +318,7 @@ sub create_path {
     $sth->finish;
 
     $dbh->do("update metadata set links=links+1 where inode=$inode");
+    $dbh->do("update metadata set links=links+1 where inode=$parent");
 }
 
 sub create_inode_and_path {
@@ -357,6 +366,7 @@ sub unlink_file {
     $sth->execute($inode,$parent,$name) or die $dbh->errstr;
 
     $dbh->do("update metadata set links=links-1 where inode=$inode");
+    $dbh->do("update metadata set links=links-1 where inode=$parent");
     $self->unlink_inode($inode);
 }
 
@@ -366,21 +376,38 @@ sub unlink_inode {
     my $dbh   = $self->dbh;
     my ($references) = $dbh->selectrow_array("select links+inuse from metadata where inode=$inode");
     return if $references > 0;
-    $dbh->do("delete from metadata where inode=$inode") or die $dbh->errstr;
-    $dbh->do("delete from data     where inode=$inode") or die $dbh->errstr;
+    eval {
+	$dbh->begin_work;
+	$dbh->do("delete from metadata where inode=$inode") or die $dbh->errstr;
+	$dbh->do("delete from data     where inode=$inode") or die $dbh->errstr;
+	$dbh->commit;
+    };
+    if ($@) {
+	warn "commit aborted due to $@";
+	eval {$dbh->rollback};
+    }
 }
 
 sub remove_dir {
     my $self = shift;
     my $path  = shift;
-    my $inode = $self->path2inode($path) ;
+    my ($inode,$parent,$name) = $self->path2inode($path) ;
     $self->_isdir($inode)                or croak "$path is not a directory";
-    $self->_entries($inode )            and croak "$path is not empty";
+    $self->_getdir($inode )             and croak "$path is not empty";
 
     my $dbh   = $self->dbh;
-    $dbh->do("update metadata set links=links-1 where inode=$inode");
-    $dbh->do("delete from path where inode=$inode");
-    $self->unlink_inode($inode);
+    eval {
+	$dbh->begin_work;
+	$dbh->do("update metadata set links=links-1 where inode=$inode");
+	$dbh->do("update metadata set links=links-1 where inode=$parent");
+	$dbh->do("delete from path where inode=$inode");
+	$self->unlink_inode($inode);
+	$dbh->commit;
+    };
+    if($@) {
+	warn "update aborted due to $@";
+	eval {$dbh->rollback()};
+    }
 }    
 
 sub chown {
@@ -451,7 +478,13 @@ sub read {
     }
 
     my $dbh = $self->dbh;
-    my $sth = $dbh->prepare_cached("select block,contents from data where inode=? and block between ? and ? order by block");
+    my $sth = $dbh->prepare_cached(<<END);
+select block,contents 
+   from data where inode=? 
+   and block between ? and ? 
+   order by block
+END
+;
     $sth->execute($inode,$first_block,$last_block);
 
     my $previous_block;
@@ -485,17 +518,36 @@ sub file_length {
 }
 
 sub open {
-    my ($self,$path,$flags,$info) = @_;
+    my ($self,$path,$flags,$info,$uid,$gid) = @_;
     my $inode  = $self->path2inode($path);
-    $self->dbh->do("update metadata set inuse=inuse+1 where inode=$inode");
+    $self->check_perm($inode,$flags,$uid,$gid);
+    # mtime=mtime to avoid updating the modification time!
+    $self->dbh->do("update metadata set inuse=inuse+1,mtime=mtime where inode=$inode");
     return $inode;
 }
+
+sub check_perm {
+    my $self = shift;
+    my ($inode,$flags,$uid,$gid) = @_;
+    my ($mode,$owner,$group) 
+	= $self->dbh->selectrow_array("select 0xfff&mode,uid,gid from metadata where inode=$inode");
+    warn sprintf("flags=0%o, mode=0%o, uid=%d, gid=%d\n",
+		 $flags,$mode,$owner,$group);
+    my $wants_read  = $flags & (O_RDWR|O_RDONLY);
+    my $wants_write = $flags & (O_RDWR|O_WRONLY);
+    $mode          &= 0777;
+    my $mask        = $uid==$owner ? $mode >> 6
+                     :$gid==$group ? $mode >> 3
+                     : $mode;
+    return 0;
+}     
 
 sub release {
     my ($self,$inode) = @_;
     $self->flush(undef,$inode);  # write cached blocks
     my $dbh = $self->dbh;
-    $dbh->do("update metadata set inuse=inuse-1 where inode=$inode");
+    # mtime=mtime to avoid updating the modification time!
+    $dbh->do("update metadata set inuse=inuse-1,mtime=mtime where inode=$inode");
     $self->unlink_inode($inode);
     return 0;
 }
@@ -682,20 +734,20 @@ sub utime {
     return $result;
 }
 
-sub entries {
+sub getdir {
     my $self = shift;
     my $path = shift;
     my $inode = $self->path2inode($path) ;
     $self->_isdir($inode) or croak "not directory";
-    return $self->_entries($inode);
+    return $self->_getdir($inode);
 }
 
-sub _entries {
+sub _getdir {
     my $self  = shift;
     my $inode = shift;
     my $dbh   = $self->dbh;
     my $col   = $dbh->selectcol_arrayref("select name from path where parent=$inode");
-    return @$col;
+    return '.','..',@$col;
 }
 
 sub errno {
@@ -762,43 +814,17 @@ sub _initialize_schema {
     $dbh->do('drop table if exists metadata') or croak $dbh->errstr;
     $dbh->do('drop table if exists path')     or croak $dbh->errstr;
     $dbh->do('drop table if exists data')     or croak $dbh->errstr;
-    $dbh->do(<<END)                           or croak $dbh->errstr;
-create table metadata (
-    inode        int(10)      auto_increment primary key,
-    mode         int(10)      not null,
-    uid          int(10)      not null,
-    gid          int(10)      not null,
-    links        int(10)      default 0,
-    inuse        int(10)      default 0,
-    length       bigint       default 0,
-    mtime        timestamp,
-    ctime        timestamp,
-    atime        timestamp
-) ENGINE=INNODB
-END
-;
-    $dbh->do(<<END)                       or croak $dbh->errstr;
-create table path (
-    inode        int(10)      not null,
-    name         varchar(255) not null,
-    parent       int(10),
-    index path (parent,name)
-) ENGINE=INNODB
-END
-    ;
-    $dbh->do(<<END)                       or croak $dbh->errstr;
-create table data (
-    inode        int(10),
-    block        int(10),
-    contents     blob,
-    unique index iblock (inode,block)
-) ENGINE=MYISAM
-END
-;
+    $dbh->do($self->_metadata_table_def)      or croak $dbh->errstr;
+    $dbh->do($self->_path_table_def)          or croak $dbh->errstr;
+    $dbh->do($self->_data_table_def)          or croak $dbh->errstr;
+
     # create the root node
     # should update this to use fuse_get_context to get proper uid, gid and masked permissions
-    my $mode = 0040000|0777;
-    $dbh->do("insert into metadata (inode,mode,uid,gid,mtime,ctime,atime) values(1,$mode,0,0,null,null,null)") 
+    my $mode = (0040000|0777)&~umask();
+    my $uid = $<;
+    my $gid = $(;
+    $gid    =~ s/ .+$//;
+    $dbh->do("insert into metadata (inode,mode,uid,gid,links,mtime,ctime,atime) values(1,$mode,$uid,$gid,2,null,null,null)") 
 	or croak $dbh->errstr;
     $dbh->do("insert into path (inode,name,parent) values (1,'/',null)")
 	or croak $dbh->errstr;
