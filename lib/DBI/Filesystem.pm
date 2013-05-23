@@ -72,11 +72,13 @@ sub mount {
 	       read        => "$pkg\:\:e_read",
 	       write       => "$pkg\:\:e_write",
 	       truncate    => "$pkg\:\:e_truncate",
+	       create      => "$pkg\:\:e_create",
 	       mknod       => "$pkg\:\:e_mknod",
 	       mkdir       => "$pkg\:\:e_mkdir",
 	       rmdir       => "$pkg\:\:e_rmdir",
 	       link        => "$pkg\:\:e_link",
 	       rename      => "$pkg\:\:e_rename",
+	       access      => "$pkg\:\:e_access",
 	       chmod       => "$pkg\:\:e_chmod",
 	       chown       => "$pkg\:\:e_chown",
 	       symlink     => "$pkg\:\:e_symlink",
@@ -128,13 +130,27 @@ sub e_mkdir {
 sub e_mknod {
     my $path = fixup(shift);
     my ($mode,$device) = @_;
+    warn "open($path,$mode,$device)";
     eval {$Self->create_file($path,$mode,0,0)};
     return $Self->errno($@) if $@;
     0;
 }
 
+sub e_create {
+    my $path = fixup(shift);
+    my ($mode,$flags) = @_;
+    warn sprintf("create(%s,0%o,0%o)",$path,$mode,$flags);
+    my $fh = eval {
+	$Self->create_file($path,$mode,0,0);
+	$Self->open($path,$flags);
+    };
+    return $Self->errno($@) if $@;
+    return (0,$fh);
+}
+
 sub e_open {
     my ($path,$flags,$info) = @_;
+    warn sprintf("open(%s,0%o,%s)",$path,$flags,$info);
     $path    = fixup($path);
     my $fh = eval {$Self->open($path,$flags,$info)};
     return $Self->errno($@) if $@;
@@ -176,6 +192,11 @@ sub e_link {
     my ($oldname,$newname) = @_;
     eval {$Self->create_hardlink($oldname,$newname)};
     return $Self->errno($@) if $@;
+    return 0;
+}
+
+sub e_access {
+    my ($path,$access_mode) = @_;
     return 0;
 }
 
