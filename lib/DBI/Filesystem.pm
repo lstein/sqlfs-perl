@@ -30,7 +30,7 @@ use threads::shared;
 use File::Basename 'basename','dirname';
 use File::Spec;
 use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO EPERM
-             O_RDONLY O_WRONLY O_RDWR);
+             O_RDONLY O_WRONLY O_RDWR O_CREAT);
 use Carp 'croak';
 use Symbol 'gensym';
 use IO::Handle;
@@ -329,10 +329,7 @@ sub create_path {
     my $self = shift;
     my ($inode,$path) = @_;
 
-    my $dir    = dirname($path);
-    $dir       = '/' if $dir eq '.'; # work around funniness in dirname()
-    my $parent = $self->path2inode($dir) or die "invalid directory";
-
+    my $parent = $self->path2inode($self->_dirname($path));
     my $base   = basename($path);
     $base      =~ s!/!_!g;
 
@@ -350,6 +347,10 @@ sub create_inode_and_path {
     my ($path,$type,$mode,$uid,$gid) = @_;
     my $dbh    = $self->dbh;
     my $inode;
+
+    my $parent = $self->path2inode($self->_dirname($path));
+    $self->check_perm($parent,O_WRONLY,$uid,$gid);
+
     eval {
 	$dbh->begin_work;
 	$inode  = $self->create_inode($type,$mode,$uid,$gid);
@@ -371,7 +372,7 @@ sub create_file {
 
 sub create_directory {
     my $self = shift;
-    my ($path,$mode,$uid,$gid) = @_;    
+    my ($path,$mode,$uid,$gid) = @_;
     $self->create_inode_and_path($path,'d',$mode,$uid,$gid);
 }
 
@@ -822,6 +823,13 @@ sub path2inode {
     return wantarray ? @v : $v[0];
 }
 
+sub _dirname {
+    my $self = shift;
+    my $path = shift;
+    my $dir  = dirname($path);
+    $dir     = '/' if $dir eq '.'; # work around funniness in dirname()    
+    return $dir;
+}
 sub _path2inode_sql {
     my $self   = shift;
     my $path   = shift;
