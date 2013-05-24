@@ -29,7 +29,7 @@ use threads;
 use threads::shared;
 use File::Basename 'basename','dirname';
 use File::Spec;
-use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO
+use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO EPERM
              O_RDONLY O_WRONLY O_RDWR);
 use Carp 'croak';
 use Symbol 'gensym';
@@ -146,9 +146,13 @@ sub e_create {
     my $path = fixup(shift);
     my ($mode,$flags) = @_;
     warn sprintf("create(%s,0%o,0%o)",$path,$mode,$flags);
+    my $ctx            = fuse_get_context;
+    my $umask          = $ctx->{umask};
     my $fh = eval {
-	$Self->create_file($path,$mode,0,0);
-	$Self->open($path,$flags);
+	$Self->create_file($path,$mode&(~$umask),$ctx->{uid},$ctx->{gid});
+	warn "ctx keys = ",join ',',keys %$ctx;
+	warn "gid = $ctx->{gid}";
+	$Self->open($path,$flags,{},$ctx->{uid},$ctx->{gid});
     };
     return $Self->errno($@) if $@;
     return (0,$fh);
@@ -158,7 +162,7 @@ sub e_open {
     my ($path,$flags,$info) = @_;
     warn sprintf("open(%s,0%o,%s)",$path,$flags,$info);
     $path    = fixup($path);
-    my $ctx  = fuse_get_context;
+    my $ctx  = fuse_get_context();
     my $fh = eval {$Self->open($path,$flags,$info,$ctx->{uid},$ctx->{gid})};
     return $Self->errno($@) if $@;
     (0,$fh);
@@ -425,8 +429,8 @@ sub remove_dir {
 	$dbh->commit;
     };
     if($@) {
-	warn "update aborted due to $@";
 	eval {$dbh->rollback()};
+	die "update aborted due to $@";
     }
 }    
 
@@ -435,7 +439,16 @@ sub chown {
     my ($path,$uid,$gid)  = @_;
     my $inode             = $self->path2inode($path) ;
     my $dbh               = $self->dbh;
-    return $dbh->do("update metadata set uid=$uid,gid=$gid where inode=$inode");
+    eval {
+	$dbh->begin_work();
+	$dbh->do("update metadata set uid=$uid where inode=$inode") if $uid!=0xffffffff;
+	$dbh->do("update metadata set gid=$gid where inode=$inode") if $gid!=0xffffffff;
+	$dbh->commit();
+    };
+    if ($@) {
+	eval {$dbh->rollback()};
+	die "update aborted due to $@";
+    }
 }
 
 sub chmod {
@@ -538,7 +551,8 @@ sub file_length {
 }
 
 sub open {
-    my ($self,$path,$flags,$info,$uid,$gid) = @_;
+    my $self = shift;
+    my ($path,$flags,$info,$uid,$gid) = @_;
     my $inode  = $self->path2inode($path);
     $self->check_perm($inode,$flags,$uid,$gid);
     # mtime=mtime to avoid updating the modification time!
@@ -551,15 +565,22 @@ sub check_perm {
     my ($inode,$flags,$uid,$gid) = @_;
     my ($mode,$owner,$group) 
 	= $self->dbh->selectrow_array("select 0xfff&mode,uid,gid from metadata where inode=$inode");
-    warn sprintf("flags=0%o, mode=0%o, uid=%d, gid=%d\n",
-		 $flags,$mode,$owner,$group);
-    my $wants_read  = $flags & (O_RDWR|O_RDONLY);
-    my $wants_write = $flags & (O_RDWR|O_WRONLY);
-    $mode          &= 0777;
+    warn sprintf("flags=0%o, mode=0%o, owner=%d, group=%d, uid=%d, gid=%d\n",
+		 $flags,$mode,$owner,$group,$uid,$gid);
+    $flags         &= 0x3;
+    my $wants_read  = $flags==O_RDONLY || $flags==O_RDWR;
+    my $wants_write = $flags==O_WRONLY || $flags==O_RDWR;
     my $groups      = $self->{_group_cache}{$uid} ||= $self->_get_groups($uid,$gid);
-    my $mask        = $uid==$owner  ? $mode >> 6
-                     :$groups{$gid} ? $mode >> 3
+    warn "my groups = ",join',',keys %$groups;
+    my $perm_word   = $uid==$owner      ? $mode >> 6
+                     :$groups->{$group} ? $mode >> 3
                      :$mode;
+    $perm_word     &= 07;
+
+    warn sprintf("permission word = %b, wants_read=$wants_read, wants_write=$wants_write",$perm_word);
+
+    $perm_word & 04 or die "permission denied" if $wants_read;
+    $perm_word & 02 or die "permission denied" if $wants_write;
     return 0;
 }     
 
@@ -779,6 +800,7 @@ sub errno {
     return -ENOTDIR()   if $@ =~ /not a directory/;
     return -EINVAL()    if $@ =~ /length beyond end of file/;
     return -ENOTEMPTY() if $@ =~ /not empty/;
+    return -EACCES()    if $@ =~ /permission denied/;
     return -EIO()       if $@;
 }
 
@@ -856,11 +878,12 @@ sub _get_groups {
     my ($uid,$gid) = @_;
     my %result;
     $result{$gid}++;
-    my $name = getpwuid($uid) or return \%result;
-    while (my($name,$id,$members) = getgrent) {
-	next unless $members =~ /\b$name\b/;
+    my $username = getpwuid($uid) or return \%result;
+    while (my($name,undef,$id,$members) = getgrent) {
+	next unless $members =~ /\b$username\b/;
 	$result{$id}++;
     }
+    endgrent;
     return \%result;
 }
 
