@@ -349,7 +349,7 @@ sub create_inode_and_path {
     my $inode;
 
     my $parent = $self->path2inode($self->_dirname($path));
-    $self->check_perm($parent,O_WRONLY,$uid,$gid);
+    $self->check_perm($parent,02,$uid,$gid);
 
     eval {
 	$dbh->begin_work;
@@ -555,22 +555,31 @@ sub open {
     my $self = shift;
     my ($path,$flags,$info,$uid,$gid) = @_;
     my $inode  = $self->path2inode($path);
-    $self->check_perm($inode,$flags,$uid,$gid);
+    $self->check_open_perm($inode,$flags,$uid,$gid);
     # mtime=mtime to avoid updating the modification time!
     $self->dbh->do("update metadata set inuse=inuse+1,mtime=mtime where inode=$inode");
     return $inode;
 }
 
-sub check_perm {
+sub check_open_perm {
     my $self = shift;
     my ($inode,$flags,$uid,$gid) = @_;
-    my ($mode,$owner,$group) 
-	= $self->dbh->selectrow_array("select 0xfff&mode,uid,gid from metadata where inode=$inode");
-    warn sprintf("flags=0%o, mode=0%o, owner=%d, group=%d, uid=%d, gid=%d\n",
-		 $flags,$mode,$owner,$group,$uid,$gid);
     $flags         &= 0x3;
     my $wants_read  = $flags==O_RDONLY || $flags==O_RDWR;
     my $wants_write = $flags==O_WRONLY || $flags==O_RDWR;
+    my $mask        = 0000;
+    $mask          |= 04 if $wants_read;
+    $mask          |= 02 if $wants_write;
+    return $self->check_perm($inode,$mask,$uid,$gid);
+}
+
+sub check_perm {
+    my $self = shift;
+    my ($inode,$perm_requested,$uid,$gid) = @_;
+    my ($mode,$owner,$group) 
+	= $self->dbh->selectrow_array("select 0xfff&mode,uid,gid from metadata where inode=$inode");
+    warn sprintf("check_perm(%d): requested=0%o, mode=0%o, owner=%d, group=%d, uid=%d, gid=%d\n",
+		 $inode,$perm_requested,$mode,$owner,$group,$uid,$gid);
     my $groups      = $self->{_group_cache}{$uid} ||= $self->_get_groups($uid,$gid);
     warn "my groups = ",join',',keys %$groups;
     my $perm_word   = $uid==$owner      ? $mode >> 6
@@ -578,10 +587,7 @@ sub check_perm {
                      :$mode;
     $perm_word     &= 07;
 
-    warn sprintf("permission word = %b, wants_read=$wants_read, wants_write=$wants_write",$perm_word);
-
-    $perm_word & 04 or die "permission denied" if $wants_read;
-    $perm_word & 02 or die "permission denied" if $wants_write;
+    $perm_word & $perm_requested or die "permission denied";
     return 0;
 }     
 
