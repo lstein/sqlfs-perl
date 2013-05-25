@@ -30,7 +30,7 @@ use threads::shared;
 use File::Basename 'basename','dirname';
 use File::Spec;
 use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO EPERM
-             O_RDONLY O_WRONLY O_RDWR O_CREAT);
+             O_RDONLY O_WRONLY O_RDWR O_CREAT F_OK R_OK W_OK X_OK);
 use Carp 'croak';
 use Symbol 'gensym';
 use IO::Handle;
@@ -38,9 +38,6 @@ use IO::Handle;
 use constant MAX_PATH_LEN => 4096;  # characters
 use constant BLOCKSIZE    => 4096;  # bytes
 use constant FLUSHBLOCKS  => 32;    # flush after we've accumulated this many cached blocks
-use constant S_EXE        => 1;
-use constant S_WR         => 2;
-use constant S_RD         => 4;
 
 my %Blockbuff :shared;
 
@@ -212,6 +209,9 @@ sub e_link {
 
 sub e_access {
     my ($path,$access_mode) = @_;
+    my $ctx = fuse_get_context();
+    eval {$Self->access($path,$access_mode,$ctx->{uid},$ctx->{gid})};
+    return $Self->errno($@) if $@;
     return 0;
 }
 
@@ -314,8 +314,8 @@ sub create_inode {
 sub create_hardlink {
     my $self = shift;
     my ($oldpath,$newpath,$uid,$gid) = @_;
-    $self->check_perm(scalar $self->path2inode($self->_dirname($oldpath)),S_WR,$uid,$gid);
-    $self->check_perm(scalar $self->path2inode($self->_dirname($newpath)),S_WR,$uid,$gid);
+    $self->check_perm(scalar $self->path2inode($self->_dirname($oldpath)),W_OK,$uid,$gid);
+    $self->check_perm(scalar $self->path2inode($self->_dirname($newpath)),W_OK,$uid,$gid);
     my $inode  = $self->path2inode($oldpath);
     $self->create_path($inode,$newpath);
 }
@@ -392,7 +392,7 @@ sub unlink_file {
     my ($inode,$parent,$name)  = $self->path2inode($path) ;
 
     $parent ||= 1;
-    $self->check_perm($parent,S_WR,$uid,$gid);
+    $self->check_perm($parent,W_OK,$uid,$gid);
 
     $name   ||= basename($path);
 
@@ -574,6 +574,13 @@ sub open {
     return $inode;
 }
 
+sub access {
+    my $self = shift;
+    my ($path,$access_mode,$uid,$gid) = @_;
+    my $inode = $Self->path2inode($path);
+    return $self->check_perm($inode,$access_mode,$uid,$gid);
+}
+
 sub check_open_perm {
     my $self = shift;
     my ($inode,$flags,$uid,$gid) = @_;
@@ -581,18 +588,18 @@ sub check_open_perm {
     my $wants_read  = $flags==O_RDONLY || $flags==O_RDWR;
     my $wants_write = $flags==O_WRONLY || $flags==O_RDWR;
     my $mask        = 0000;
-    $mask          |= S_RD if $wants_read;
-    $mask          |= S_WR if $wants_write;
+    $mask          |= R_OK if $wants_read;
+    $mask          |= W_OK if $wants_write;
     return $self->check_perm($inode,$mask,$uid,$gid);
 }
 
 sub check_perm {
     my $self = shift;
-    my ($inode,$perm_requested,$uid,$gid) = @_;
+    my ($inode,$access_mode,$uid,$gid) = @_;
     my ($mode,$owner,$group) 
 	= $self->dbh->selectrow_array("select 0xfff&mode,uid,gid from metadata where inode=$inode");
-    warn sprintf("check_perm(%d): requested=0%o, mode=0%o, owner=%d, group=%d, uid=%d, gid=%d\n",
-		 $inode,$perm_requested,$mode,$owner,$group,$uid,$gid);
+    warn sprintf("check_perm(%d): access_mode=0%o, mode=0%o, owner=%d, group=%d, uid=%d, gid=%d\n",
+		 $inode,$access_mode,$mode,$owner,$group,$uid,$gid);
     my $groups      = $self->{_group_cache}{$uid} ||= $self->_get_groups($uid,$gid);
     warn "my groups = ",join',',keys %$groups;
     my $perm_word   = $uid==$owner      ? $mode >> 6
@@ -600,7 +607,7 @@ sub check_perm {
                      :$mode;
     $perm_word     &= 07;
 
-    $perm_word & $perm_requested or die "permission denied";
+    $perm_word & $access_mode or die "permission denied";
     return 0;
 }     
 
@@ -775,7 +782,7 @@ sub utime {
     my $self = shift;
     my ($path,$atime,$mtime,$uid,$gid) = @_;
     my $inode = $self->path2inode($path) ;
-    $self->check_perm($inode,S_WR,$uid,$gid);
+    $self->check_perm($inode,W_OK,$uid,$gid);
     my $dbh    = $self->dbh;
     my $sth    = $dbh->prepare_cached("update metadata set atime=from_unixtime(?),mtime=from_unixtime(?)");
     my $result = $sth->execute($atime,$mtime);
@@ -787,7 +794,7 @@ sub getdir {
     my $self = shift;
     my ($path,$uid,$gid) = @_;
     my $inode = $self->path2inode($path);
-    $self->check_perm($inode,S_RD,$uid,$gid);
+    $self->check_perm($inode,R_OK,$uid,$gid);
     $self->_isdir($inode) or croak "not directory";
     return $self->_getdir($inode);
 }
