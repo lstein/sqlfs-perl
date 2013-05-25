@@ -38,6 +38,9 @@ use IO::Handle;
 use constant MAX_PATH_LEN => 4096;  # characters
 use constant BLOCKSIZE    => 4096;  # bytes
 use constant FLUSHBLOCKS  => 32;    # flush after we've accumulated this many cached blocks
+use constant S_EXE        => 1;
+use constant S_WR         => 2;
+use constant S_RD         => 4;
 
 my %Blockbuff :shared;
 
@@ -103,7 +106,8 @@ sub fixup {
 
 sub e_getdir {
     my $path = fixup(shift);
-    my @entries = eval {$Self->getdir($path)};
+    my $ctx  = fuse_get_context;
+    my @entries = eval {$Self->getdir($path,$ctx->{uid},$ctx->{gid})};
     return $Self->errno($@) if $@;
     return (@entries,0);
 }
@@ -213,9 +217,10 @@ sub e_access {
 
 sub e_rename {
     my ($oldname,$newname) = @_;
-    eval {
-	$Self->create_hardlink($oldname,$newname);
-	$Self->unlink_file($oldname);
+    my $ctx = fuse_get_context;
+    eval { 
+	$Self->create_hardlink($oldname,$newname,$ctx->{uid},$ctx->{gid});
+	$Self->unlink_file($oldname,$ctx->{uid},$ctx->{gid});
     };
     return $Self->errno($@) if $@;
     return 0;
@@ -252,14 +257,16 @@ sub e_readlink {
 
 sub e_unlink {
     my $path = shift;
-    eval {$Self->unlink_file($path)};
+    my $ctx  = fuse_get_context;
+    eval {$Self->unlink_file($path,$ctx->{uid},$ctx->{gid})};
     return $Self->errno($@) if $@;
     return 0;
 }
 
 sub e_rmdir {
     my $path = shift;
-    eval {$Self->remove_dir($path)};
+    my $ctx  = fuse_get_context();
+    eval {$Self->remove_dir($path,$ctx->{uid},$ctx->{gid})};
     return $Self->errno($@) if $@;
     return 0;
 }
@@ -267,7 +274,8 @@ sub e_rmdir {
 sub e_utime {
     my ($path,$atime,$mtime) = @_;
     $path = fixup($path);
-    my $result = eval {$Self->utime($path,$atime,$mtime)};
+    my $ctx  = fuse_get_context();
+    my $result = eval {$Self->utime($path,$atime,$mtime,$ctx->{uid},$ctx->{gid})};
     return $Self->errno($@) if $@;
     return 0;
 }
@@ -305,7 +313,9 @@ sub create_inode {
 
 sub create_hardlink {
     my $self = shift;
-    my ($oldpath,$newpath) = @_;
+    my ($oldpath,$newpath,$uid,$gid) = @_;
+    $self->check_perm(scalar $self->path2inode($self->_dirname($oldpath)),S_WR,$uid,$gid);
+    $self->check_perm(scalar $self->path2inode($self->_dirname($newpath)),S_WR,$uid,$gid);
     my $inode  = $self->path2inode($oldpath);
     $self->create_path($inode,$newpath);
 }
@@ -378,13 +388,15 @@ sub create_directory {
 
 sub unlink_file {
     my $self  = shift;
-    my $path  = shift;
+    my ($path,$uid,$gid)  = @_;
     my ($inode,$parent,$name)  = $self->path2inode($path) ;
 
     $parent ||= 1;
+    $self->check_perm($parent,S_WR,$uid,$gid);
+
     $name   ||= basename($path);
 
-    $self->_isdir($inode)               and croak "$path is a directory";
+    $self->_isdir($inode)      and croak "$path is a directory";
     my $dbh                    = $self->dbh;
     my $sth                    = $dbh->prepare_cached("delete from path where inode=? and parent=? and name=?") 
 	or die $dbh->errstr;
@@ -415,8 +427,9 @@ sub unlink_inode {
 
 sub remove_dir {
     my $self = shift;
-    my $path  = shift;
+    my ($path,$uid,$gid)  = @_;
     my ($inode,$parent,$name) = $self->path2inode($path) ;
+    $self->check_perm($parent,02,$uid,$gid);
     $self->_isdir($inode)                or croak "$path is not a directory";
     $self->_getdir($inode )             and croak "$path is not empty";
 
@@ -568,8 +581,8 @@ sub check_open_perm {
     my $wants_read  = $flags==O_RDONLY || $flags==O_RDWR;
     my $wants_write = $flags==O_WRONLY || $flags==O_RDWR;
     my $mask        = 0000;
-    $mask          |= 04 if $wants_read;
-    $mask          |= 02 if $wants_write;
+    $mask          |= S_RD if $wants_read;
+    $mask          |= S_WR if $wants_write;
     return $self->check_perm($inode,$mask,$uid,$gid);
 }
 
@@ -758,24 +771,11 @@ sub _isdir {
     return $result;
 }
 
-sub touch {
-    my $self = shift;
-    my $path = shift;
-    my $inode = $self->path2inode($path) ;
-    $self->_touch($inode);
-}
-
-sub _touch {
-    my $self  = shift;
-    my $inode = shift;
-    my $dbh   = $self->dbh;
-    $dbh->do("update metadata set mtime=now() where inode=$inode");
-}
-
 sub utime {
     my $self = shift;
-    my ($path,$atime,$mtime) = @_;
+    my ($path,$atime,$mtime,$uid,$gid) = @_;
     my $inode = $self->path2inode($path) ;
+    $self->check_perm($inode,S_WR,$uid,$gid);
     my $dbh    = $self->dbh;
     my $sth    = $dbh->prepare_cached("update metadata set atime=from_unixtime(?),mtime=from_unixtime(?)");
     my $result = $sth->execute($atime,$mtime);
@@ -785,8 +785,9 @@ sub utime {
 
 sub getdir {
     my $self = shift;
-    my $path = shift;
-    my $inode = $self->path2inode($path) ;
+    my ($path,$uid,$gid) = @_;
+    my $inode = $self->path2inode($path);
+    $self->check_perm($inode,S_RD,$uid,$gid);
     $self->_isdir($inode) or croak "not directory";
     return $self->_getdir($inode);
 }
