@@ -103,8 +103,7 @@ sub fixup {
 
 sub e_getdir {
     my $path = fixup(shift);
-    my $ctx  = fuse_get_context;
-    my @entries = eval {$Self->getdir($path,$ctx->{uid},$ctx->{gid})};
+    my @entries = eval {$Self->getdir($path)};
     return $Self->errno($@) if $@;
     return (@entries,0);
 }
@@ -163,8 +162,7 @@ sub e_open {
     my ($path,$flags,$info) = @_;
     warn sprintf("open(%s,0%o,%s)",$path,$flags,$info);
     $path    = fixup($path);
-    my $ctx  = fuse_get_context();
-    my $fh = eval {$Self->open($path,$flags,$info,$ctx->{uid},$ctx->{gid})};
+    my $fh = eval {$Self->open($path,$flags,$info)};
     return $Self->errno($@) if $@;
     (0,$fh);
 }
@@ -209,18 +207,16 @@ sub e_link {
 
 sub e_access {
     my ($path,$access_mode) = @_;
-    my $ctx = fuse_get_context();
-    eval {$Self->access($path,$access_mode,$ctx->{uid},$ctx->{gid})};
+    eval {$Self->access($path,$access_mode)};
     return $Self->errno($@) if $@;
     return 0;
 }
 
 sub e_rename {
     my ($oldname,$newname) = @_;
-    my $ctx = fuse_get_context;
     eval { 
-	$Self->create_hardlink($oldname,$newname,$ctx->{uid},$ctx->{gid});
-	$Self->unlink_file($oldname,$ctx->{uid},$ctx->{gid});
+	$Self->create_hardlink($oldname,$newname);
+	$Self->unlink_file($oldname);
     };
     return $Self->errno($@) if $@;
     return 0;
@@ -242,8 +238,7 @@ sub e_chown {
 
 sub e_symlink {
     my ($oldname,$newname) = @_;
-    my $c = fuse_get_context();
-    eval {$Self->create_symlink($oldname,$newname,$c->{uid},$c->{gid})};
+    eval {$Self->create_symlink($oldname,$newname)};
     return $Self->errno($@) if $@;
     return 0;
 }
@@ -257,16 +252,14 @@ sub e_readlink {
 
 sub e_unlink {
     my $path = shift;
-    my $ctx  = fuse_get_context;
-    eval {$Self->unlink_file($path,$ctx->{uid},$ctx->{gid})};
+    eval {$Self->unlink_file($path)};
     return $Self->errno($@) if $@;
     return 0;
 }
 
 sub e_rmdir {
     my $path = shift;
-    my $ctx  = fuse_get_context();
-    eval {$Self->remove_dir($path,$ctx->{uid},$ctx->{gid})};
+    eval {$Self->remove_dir($path)};
     return $Self->errno($@) if $@;
     return 0;
 }
@@ -274,8 +267,7 @@ sub e_rmdir {
 sub e_utime {
     my ($path,$atime,$mtime) = @_;
     $path = fixup($path);
-    my $ctx  = fuse_get_context();
-    my $result = eval {$Self->utime($path,$atime,$mtime,$ctx->{uid},$ctx->{gid})};
+    my $result = eval {$Self->utime($path,$atime,$mtime)};
     return $Self->errno($@) if $@;
     return 0;
 }
@@ -313,17 +305,17 @@ sub create_inode {
 
 sub create_hardlink {
     my $self = shift;
-    my ($oldpath,$newpath,$uid,$gid) = @_;
-    $self->check_perm(scalar $self->path2inode($self->_dirname($oldpath)),W_OK,$uid,$gid);
-    $self->check_perm(scalar $self->path2inode($self->_dirname($newpath)),W_OK,$uid,$gid);
+    my ($oldpath,$newpath) = @_;
+    $self->check_perm(scalar $self->path2inode($self->_dirname($oldpath)),W_OK);
+    $self->check_perm(scalar $self->path2inode($self->_dirname($newpath)),W_OK);
     my $inode  = $self->path2inode($oldpath);
     $self->create_path($inode,$newpath);
 }
 
 sub create_symlink {
     my $self = shift;
-    my ($oldpath,$newpath,$uid,$gid) = @_;
-    my $newnode= $self->create_inode_and_path($newpath,'l',0777,$uid,$gid);
+    my ($oldpath,$newpath) = @_;
+    my $newnode= $self->create_inode_and_path($newpath,'l',0777);
     $self->write($newpath,$oldpath);
 }
 
@@ -354,16 +346,16 @@ sub create_path {
 
 sub create_inode_and_path {
     my $self = shift;
-    my ($path,$type,$mode,$uid,$gid) = @_;
+    my ($path,$type,$mode) = @_;
     my $dbh    = $self->dbh;
     my $inode;
 
     my $parent = $self->path2inode($self->_dirname($path));
-    $self->check_perm($parent,02,$uid,$gid);
+    $self->check_perm($parent,W_OK);
 
     eval {
 	$dbh->begin_work;
-	$inode  = $self->create_inode($type,$mode,$uid,$gid);
+	$inode  = $self->create_inode($type,$mode);
 	$self->create_path($inode,$path);
 	$dbh->commit;
     };
@@ -388,11 +380,11 @@ sub create_directory {
 
 sub unlink_file {
     my $self  = shift;
-    my ($path,$uid,$gid)  = @_;
+    my $path = shift;
     my ($inode,$parent,$name)  = $self->path2inode($path) ;
 
     $parent ||= 1;
-    $self->check_perm($parent,W_OK,$uid,$gid);
+    $self->check_perm($parent,W_OK);
 
     $name   ||= basename($path);
 
@@ -427,9 +419,9 @@ sub unlink_inode {
 
 sub remove_dir {
     my $self = shift;
-    my ($path,$uid,$gid)  = @_;
+    my $path = shift;
     my ($inode,$parent,$name) = $self->path2inode($path) ;
-    $self->check_perm($parent,02,$uid,$gid);
+    $self->check_perm($parent,W_OK);
     $self->_isdir($inode)                or croak "$path is not a directory";
     $self->_getdir($inode )             and croak "$path is not empty";
 
@@ -576,28 +568,40 @@ sub open {
 
 sub access {
     my $self = shift;
-    my ($path,$access_mode,$uid,$gid) = @_;
+    my ($path,$access_mode) = @_;
     my $inode = $Self->path2inode($path);
-    return $self->check_perm($inode,$access_mode,$uid,$gid);
+    return $self->check_perm($inode,$access_mode);
 }
 
 sub check_open_perm {
     my $self = shift;
-    my ($inode,$flags,$uid,$gid) = @_;
+    my ($inode,$flags) = @_;
     $flags         &= 0x3;
     my $wants_read  = $flags==O_RDONLY || $flags==O_RDWR;
     my $wants_write = $flags==O_WRONLY || $flags==O_RDWR;
     my $mask        = 0000;
     $mask          |= R_OK if $wants_read;
     $mask          |= W_OK if $wants_write;
-    return $self->check_perm($inode,$mask,$uid,$gid);
+    return $self->check_perm($inode,$mask);
+}
+
+# traverse path recursively, checking for X permission
+sub check_path {
+    my $self = shift;
+    my ($path,$mask) = @_;
 }
 
 sub check_perm {
     my $self = shift;
-    my ($inode,$access_mode,$uid,$gid) = @_;
+    my ($inode,$access_mode) = @_;
+    my $ctx = fuse_get_context();
+    my ($uid,$gid) = @{$ctx}{'uid','gid'};
+
+    my $dbh      = $self->dbh;
+
     my ($mode,$owner,$group) 
-	= $self->dbh->selectrow_array("select 0xfff&mode,uid,gid from metadata where inode=$inode");
+	= $dbh->selectrow_array("select 0xfff&mode,uid,gid from metadata where inode=$inode");
+
     warn sprintf("check_perm(%d): access_mode=0%o, mode=0%o, owner=%d, group=%d, uid=%d, gid=%d\n",
 		 $inode,$access_mode,$mode,$owner,$group,$uid,$gid);
     my $groups      = $self->{_group_cache}{$uid} ||= $self->_get_groups($uid,$gid);
