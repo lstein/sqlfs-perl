@@ -67,7 +67,7 @@ sub mount {
 
     $Self = $self;  # because entrypoints cannot be passed as closures
     Fuse::main(mountpoint  => $mtpt,
-	       mountopts   => 'hard_remove',
+	       mountopts   => 'hard_remove,allow_other',
 	       getdir      => "$pkg\:\:e_getdir",
 	       getattr     => "$pkg\:\:e_getattr",
 	       fgetattr    => "$pkg\:\:e_fgetattr",
@@ -445,6 +445,14 @@ sub chown {
     my $self              = shift;
     my ($path,$uid,$gid)  = @_;
     my $inode             = $self->path2inode($path) ;
+
+    # permission checking here
+    my $ctx = fuse_get_context();
+    die "permission denied" unless $uid == 0xffffffff || $ctx->{uid} == 0;
+
+    my $groups            = $self->get_groups(@{$ctx}{'uid','gid'});
+    die "permission denied" unless $gid == 0xffffffff || $ctx->{uid} == 0 || $groups->{$gid};
+
     my $dbh               = $self->dbh;
     eval {
 	$dbh->begin_work();
@@ -609,7 +617,6 @@ END
 	               :$groups->{$group} ? S_IXGRP
                        :S_IXOTH;
 	my $allowed = $mask & $mode;
-#	warn "check_path(inode=$inode, name=$name, allowed =$allowed)";
 	$ok &&= $allowed;
 	$inode          = $node;
 	$dir            = $self->_dirname($dir);
@@ -639,7 +646,7 @@ sub check_perm {
 #    warn sprintf("check_perm(%d): access_mode=0%o, allowed=%d, mode=0%o, owner=%d, group=%d, uid=%d, gid=%d\n",
 #		 $inode,$access_mode,$perm_word & $access_mode,$mode,$owner,$group,$uid,$gid);
 
-    $perm_word & $access_mode or die "permission denied";
+    $access_mode==($perm_word & $access_mode) or die "permission denied";
     return 0;
 }     
 
@@ -827,8 +834,7 @@ sub getdir {
     my ($path,$uid,$gid) = @_;
     my $inode = $self->path2inode($path);
     $self->_isdir($inode) or croak "not directory";
-    $self->check_perm($inode,X_OK);
-    $self->check_perm($inode,R_OK);
+    $self->check_perm($inode,X_OK|R_OK);
     return $self->_getdir($inode);
 }
 
