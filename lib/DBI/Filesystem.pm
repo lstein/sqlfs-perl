@@ -470,7 +470,6 @@ sub fstat {
     my $self  = shift;
     my ($path,$inode) = @_;
     $inode ||= $self->path2inode;
-#    $self->check_perm($inode,R_OK); # ??
     my $dbh          = $self->dbh;
     my ($ino,$mode,$uid,$gid,$nlinks,$ctime,$mtime,$atime,$size) =
 	$dbh->selectrow_array(<<END);
@@ -485,8 +484,8 @@ END
     $ino or die $dbh->errstr;
 
     my $dev     = 0;
-    my $blksize = 16384;
     my $blocks  = 1;
+    my $blksize = BLOCKSIZE;
     return ($dev,$ino,$mode,$nlinks,$uid,$gid,0,$size,$atime,$mtime,$ctime,$blksize,$blocks);
 }
 
