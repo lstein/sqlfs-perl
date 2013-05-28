@@ -38,7 +38,7 @@ use IO::Handle;
 
 use constant MAX_PATH_LEN => 4096;  # characters
 use constant BLOCKSIZE    => 4096;  # bytes
-use constant FLUSHBLOCKS  => 32;    # flush after we've accumulated this many cached blocks
+use constant FLUSHBLOCKS  => 64;    # flush after we've accumulated this many cached blocks
 
 my %Blockbuff :shared;
 
@@ -296,7 +296,6 @@ sub create_inode {
     $gid ||= 0;
 
     my $dbh = $self->dbh;
-    warn $self->_create_inode_sql;
     my $sth = $dbh->prepare_cached($self->_create_inode_sql);
     $sth->execute($mode,$uid,$gid,$type eq 'd' ? 1 : 0) or die $sth->errstr;
     $sth->finish;
@@ -485,6 +484,16 @@ sub fstat {
 	$dbh->selectrow_array($self->_fstat_sql($inode));
     $ino or die $dbh->errstr;
 
+    # make sure write buffer contributes
+    if (my $blocks = $Blockbuff{$inode}) {
+	lock $blocks; 
+	if (keys %$blocks) { 
+	    my ($biggest) = sort {$b<=>$a} keys %$blocks; 
+	    my $offset    = BLOCKSIZE * $biggest + length $blocks->{$biggest}; 
+	    $size         = $offset if $offset > $size;
+	}
+    }
+
     my $dev     = 0;
     my $blocks  = 1;
     my $blksize = BLOCKSIZE;
@@ -506,7 +515,6 @@ sub read {
 	$inode  = $self->path2inode($path);
 	$self->_isdir($inode) and croak "$path is a directory";
     }
-    $self->flush(undef,$inode);  # make sure all in-memory data written to database
     $offset  ||= 0;
 
     my $first_block = int($offset / BLOCKSIZE);
@@ -518,29 +526,42 @@ sub read {
     if ($length+$offset > $current_length) {
 	$length = $current_length - $offset;
     }
+    return $Blockbuff{$inode} ? $self->_read_cached($Blockbuff{$inode},$inode,$start,$length,$first_block,$last_block)
+	                      : $self->_read_direct(                   $inode,$start,$length,$first_block,$last_block);
+}
 
-    warn "reading $length bytes";
+# This type of read checks the write buffer for cached data.
+# If cached doesn't exist, then performs one SQL query for each block.
+sub _read_cached {
+    my $self = shift;
+    my ($blocks,$inode,$start,$length,$first_block,$last_block) = @_;
+
     my $dbh = $self->dbh;
     my $sth = $dbh->prepare_cached(<<END);
-select block,contents 
+select contents 
    from data where inode=? 
-   and block between ? and ? 
-   order by block
+   and block=?
 END
 ;
-    $sth->execute($inode,$first_block,$last_block);
-
     my $previous_block;
-    while (my ($block,$contents) = $sth->fetchrow_array) {
-	warn "got $contents";
-	$previous_block = $block unless defined $previous_block;
+    my $data = '';
+    for (my $block=$first_block;$block<=$last_block;$block++) {
+	my $contents;
+	if ($blocks->{$block}) {
+	    $contents = $blocks->{$block};
+	} else {
+	    $sth->execute($inode,$block);
+	    ($contents) = $sth->fetchrow_array;
+	}
+	next unless length $contents;
 
+	$previous_block = $block unless defined $previous_block;
 	# a hole spanning an entire block
 	if ($block - $previous_block > 1) {
 	    $data .= "\0"x(BLOCKSIZE*($block-$previous_block-1));
 	}
 	$previous_block = $block;
-
+	
 	# a hole spanning a portion of a block
 	if (length $contents < BLOCKSIZE && $block < $last_block) {
 	    $contents .= "\0"x(BLOCKSIZE-length($contents));  # this is a hole!
@@ -550,16 +571,52 @@ END
 	$start      = 0;
     }
     $sth->finish;
-    warn "returning $data";
+    return $data;
+}
+
+# This type of read is invoked when there is no write buffer for
+# the file. It executes a single SQL query across the data table.
+sub _read_direct {
+    my $self = shift;
+    my ($inode,$start,$length,$first_block,$last_block) = @_;
+
+    my $dbh = $self->dbh;
+    my $sth = $dbh->prepare_cached(<<END);
+select block,contents 
+   from data where inode=? 
+   and block between ? and ?
+   order by block
+END
+;
+    $sth->execute($inode,$first_block,$last_block);
+
+    my $previous_block;
+    my $data = '';
+    while (my ($block,$contents) = $sth->fetchrow_array) {
+	$previous_block = $block unless defined $previous_block;
+	# a hole spanning an entire block
+	if ($block - $previous_block > 1) {
+	    $data .= "\0"x(BLOCKSIZE*($block-$previous_block-1));
+	}
+	$previous_block = $block;
+	
+	# a hole spanning a portion of a block
+	if (length $contents < BLOCKSIZE && $block < $last_block) {
+	    $contents .= "\0"x(BLOCKSIZE-length($contents));  # this is a hole!
+	}
+	$data      .= substr($contents,$start,$length);
+	$length    -= BLOCKSIZE;
+	$start      = 0;
+    }
+    $sth->finish();
     return $data;
 }
 
 sub file_length {
     my $self = shift;
     my $inode = shift;
-    my $dbh   = $self->dbh;
-    my ($current_length) = $dbh->selectrow_array("select length from metadata where inode=$inode");
-    return $current_length;
+    my @stat  = $self->fstat(undef,$inode);
+    return $stat[7];
 }
 
 sub open {
@@ -720,11 +777,7 @@ sub flush {
     my $self  = shift;
     my ($path,$inode) = @_;
 
-    warn "flush $inode";
-
-    if ($path) {
-	$inode  ||= $self->path2inode($path);
-    }
+    $inode  ||= $self->path2inode($path) if $path;
 
     # if called with no inode, then recursively call ourselves
     # to flush all cached inodes
@@ -737,14 +790,11 @@ sub flush {
 
     my $blocks = $Blockbuff{$inode} or return;
 
-    warn "blocks = $blocks";
-
     lock $blocks;
     my $length = $self->file_length($inode);
     my $hwm = 0;  # high water mark ;-)
 
     my $dbh = $self->dbh;
-
     eval {
 	$dbh->begin_work;
 	my $sth = $dbh->prepare_cached(<<END) or die $dbh->errstr;
@@ -759,7 +809,7 @@ END
 	    $hwm    = $a if $a > $hwm;
 	}
 	$sth->finish;
-	$dbh->do("update metadata set length=$hwm where inode=$inode") if $hwm > $length;
+	$dbh->do("update metadata set length=$length where inode=$inode");
 	$dbh->commit();
     };
 
@@ -769,7 +819,8 @@ END
 	return;
     }
 
-    %{$Blockbuff{$inode}} = ();
+#    %{$Blockbuff{$inode}}=();
+    delete $Blockbuff{$inode};
 }
 
 sub truncate {
