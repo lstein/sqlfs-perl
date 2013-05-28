@@ -90,7 +90,7 @@ sub mount {
 	       unlink      => "$pkg\:\:e_unlink",
 	       utime       => "$pkg\:\:e_utime",
 	       nullpath_ok => 1,
-	       debug       => 0,
+	       debug       => 1,
 	       threaded    => 1,
 	);
 }
@@ -296,7 +296,8 @@ sub create_inode {
     $gid ||= 0;
 
     my $dbh = $self->dbh;
-    my $sth = $dbh->prepare_cached("insert into metadata (mode,uid,gid,links,mtime,ctime,atime) values(?,?,?,?,null,null,null)");
+    warn $self->_create_inode_sql;
+    my $sth = $dbh->prepare_cached($self->_create_inode_sql);
     $sth->execute($mode,$uid,$gid,$type eq 'd' ? 1 : 0) or die $sth->errstr;
     $sth->finish;
     return $dbh->last_insert_id(undef,undef,undef,undef);
@@ -480,20 +481,13 @@ sub fstat {
     $inode ||= $self->path2inode;
     my $dbh          = $self->dbh;
     my ($ino,$mode,$uid,$gid,$nlinks,$ctime,$mtime,$atime,$size) =
-	$dbh->selectrow_array(<<END);
-select n.inode,mode,uid,gid,links,
-       unix_timestamp(ctime),unix_timestamp(mtime),unix_timestamp(atime),
-       length
- from metadata as n
- left join data as c on (n.inode=c.inode)
- where n.inode=$inode
-END
-;
+	$dbh->selectrow_array($self->_fstat_sql($inode));
     $ino or die $dbh->errstr;
 
     my $dev     = 0;
     my $blocks  = 1;
     my $blksize = BLOCKSIZE;
+    warn "($dev,$ino,$mode,$nlinks,$uid,$gid,0,$size,$atime,$mtime,$ctime,$blksize,$blocks)";
     return ($dev,$ino,$mode,$nlinks,$uid,$gid,0,$size,$atime,$mtime,$ctime,$blksize,$blocks);
 }
 
@@ -634,8 +628,9 @@ sub check_perm {
 
     my $dbh      = $self->dbh;
 
+    my $fff = 0xfff;
     my ($mode,$owner,$group) 
-	= $dbh->selectrow_array("select 0xfff&mode,uid,gid from metadata where inode=$inode");
+	= $dbh->selectrow_array("select $fff&mode,uid,gid from metadata where inode=$inode");
 
     my $groups      = $self->get_groups($uid,$gid);
     my $perm_word   = $uid==$owner      ? $mode >> 6
@@ -812,7 +807,9 @@ sub _isdir {
     my $self  = shift;
     my $inode = shift;
     my $dbh   = $self->dbh;
-    my ($result) = $dbh->selectrow_array("select (0xf000&mode)=0x4000 from metadata where inode=$inode")
+    my $mask  = 0xf000;
+    my $isdir = 0x4000;
+    my ($result) = $dbh->selectrow_array("select ($mask&mode)=$isdir from metadata where inode=$inode")
 	or die $dbh->errstr;
     return $result;
 }
@@ -823,7 +820,7 @@ sub utime {
     my $inode = $self->path2inode($path) ;
     $self->check_perm($inode,W_OK,$uid,$gid);
     my $dbh    = $self->dbh;
-    my $sth    = $dbh->prepare_cached("update metadata set atime=from_unixtime(?),mtime=from_unixtime(?)");
+    my $sth    = $dbh->prepare_cached($self->_update_utime_sql);
     my $result = $sth->execute($atime,$mtime);
     $sth->finish();
     return $result;
@@ -928,9 +925,10 @@ sub _initialize_schema {
     $dbh->do('drop table if exists metadata') or croak $dbh->errstr;
     $dbh->do('drop table if exists path')     or croak $dbh->errstr;
     $dbh->do('drop table if exists data')     or croak $dbh->errstr;
-    $dbh->do($self->_metadata_table_def)      or croak $dbh->errstr;
-    $dbh->do($self->_path_table_def)          or croak $dbh->errstr;
-    $dbh->do($self->_data_table_def)          or croak $dbh->errstr;
+    
+    $dbh->do($_) foreach split ';',$self->_metadata_table_def;
+    $dbh->do($_) foreach split ';',$self->_path_table_def;
+    $dbh->do($_) foreach split ';',$self->_data_table_def;
 
     # create the root node
     # should update this to use fuse_get_context to get proper uid, gid and masked permissions
@@ -938,7 +936,8 @@ sub _initialize_schema {
     my $uid = $<;
     my $gid = $(;
     $gid    =~ s/ .+$//;
-    $dbh->do("insert into metadata (inode,mode,uid,gid,links,mtime,ctime,atime) values(1,$mode,$uid,$gid,2,null,null,null)") 
+    my $timestamp = $self->_timestamp_sql();
+    $dbh->do("insert into metadata (inode,mode,uid,gid,links,mtime,ctime,atime) values(1,$mode,$uid,$gid,2,$timestamp,$timestamp,$timestamp)") 
 	or croak $dbh->errstr;
     $dbh->do("insert into path (inode,name,parent) values (1,'/',null)")
 	or croak $dbh->errstr;
