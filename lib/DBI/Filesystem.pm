@@ -791,10 +791,10 @@ sub flush {
     my $blocks = $Blockbuff{$inode} or return;
 
     lock $blocks;
-    my $length = $self->file_length($inode);
-    my $hwm = 0;  # high water mark ;-)
-
     my $dbh = $self->dbh;
+    my ($length) = $dbh->selectrow_array("select length from metadata where inode=$inode");
+    my $hwm      = $length;  # high water mark ;-)
+
     eval {
 	$dbh->begin_work;
 	my $sth = $dbh->prepare_cached(<<END) or die $dbh->errstr;
@@ -809,7 +809,7 @@ END
 	    $hwm    = $a if $a > $hwm;
 	}
 	$sth->finish;
-	$dbh->do("update metadata set length=$length where inode=$inode");
+	$dbh->do("update metadata set length=$hwm where inode=$inode");
 	$dbh->commit();
     };
 
