@@ -42,6 +42,8 @@ END
 }
 
 sub _fstat_sql {
+    my $self  = shift;
+    my $inode = shift;
     return <<END;
 select n.inode,mode,uid,gid,links,
        unix_timestamp(ctime),unix_timestamp(mtime),unix_timestamp(atime),
@@ -63,7 +65,7 @@ sub _update_utime_sql {
 sub _create_inode_sql {
     my $self = shift;
     my $now = $self->_timestamp_sql;
-    return "insert into metadata (mode,uid,gid,links,mtime,ctime,atime) values(?,?,?,?,$now,$now,$now)");
+    return "insert into metadata (mode,uid,gid,links,mtime,ctime,atime) values(?,?,?,?,$now,$now,$now)";
 }
 
 1;

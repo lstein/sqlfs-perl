@@ -90,7 +90,7 @@ sub mount {
 	       unlink      => "$pkg\:\:e_unlink",
 	       utime       => "$pkg\:\:e_utime",
 	       nullpath_ok => 1,
-	       debug       => 1,
+	       debug       => 0,
 	       threaded    => 1,
 	);
 }
@@ -472,7 +472,8 @@ sub chmod {
     my ($path,$mode) = @_;
     my $inode        = $self->path2inode($path) ;
     my $dbh          = $self->dbh;
-    return $dbh->do("update metadata set mode=((0xf000&mode)|$mode) where inode=$inode");
+    my $f000         = 0xf000;
+    return $dbh->do("update metadata set mode=(($f000&mode)|$mode) where inode=$inode");
 }
 
 sub fstat {
@@ -487,7 +488,6 @@ sub fstat {
     my $dev     = 0;
     my $blocks  = 1;
     my $blksize = BLOCKSIZE;
-    warn "($dev,$ino,$mode,$nlinks,$uid,$gid,0,$size,$atime,$mtime,$ctime,$blksize,$blocks)";
     return ($dev,$ino,$mode,$nlinks,$uid,$gid,0,$size,$atime,$mtime,$ctime,$blksize,$blocks);
 }
 
@@ -519,6 +519,7 @@ sub read {
 	$length = $current_length - $offset;
     }
 
+    warn "reading $length bytes";
     my $dbh = $self->dbh;
     my $sth = $dbh->prepare_cached(<<END);
 select block,contents 
@@ -531,6 +532,7 @@ END
 
     my $previous_block;
     while (my ($block,$contents) = $sth->fetchrow_array) {
+	warn "got $contents";
 	$previous_block = $block unless defined $previous_block;
 
 	# a hole spanning an entire block
@@ -548,6 +550,7 @@ END
 	$start      = 0;
     }
     $sth->finish;
+    warn "returning $data";
     return $data;
 }
 
@@ -674,18 +677,18 @@ sub write {
     my $bytes_written  = 0;
     unless ($Blockbuff{$inode}) {
 	my %hash;
-	share (%hash);
-	$Blockbuff{$inode}=\%hash;
+	$Blockbuff{$inode}=share(%hash);
     }
     my $blocks         = $Blockbuff{$inode}; # blockno=>data
     lock $blocks;
 
+    my $dbh            = $self->dbh;
     while ($bytes_to_write > 0) {
 	my $bytes          = BLOCKSIZE > ($bytes_to_write+$start) ? $bytes_to_write : (BLOCKSIZE-$start);
 	my $current_length = length($blocks->{$block}||'');
 
 	if ($bytes < BLOCKSIZE && !$current_length) {  # partial block replacement, and not currently cached
-	    my $sth = $self->dbh->prepare_cached('select contents,length(contents) from data where inode=? and block=?');
+	    my $sth = $dbh->prepare_cached('select contents,length(contents) from data where inode=? and block=?');
 	    $sth->execute($inode,$block);
 	    ($blocks->{$block},$current_length) = $sth->fetchrow_array();
 	    $current_length                   ||= 0;
@@ -698,7 +701,7 @@ sub write {
 	    $blocks->{$block} .= $padding;
 	}
 
-	if ($start) {
+	if ($blocks->{$block}) {
 	    substr($blocks->{$block},$start,$bytes,substr($data,$bytes_written,$bytes));
 	} else {
 	    $blocks->{$block} = substr($data,$bytes_written,$bytes);
@@ -717,6 +720,8 @@ sub flush {
     my $self  = shift;
     my ($path,$inode) = @_;
 
+    warn "flush $inode";
+
     if ($path) {
 	$inode  ||= $self->path2inode($path);
     }
@@ -732,6 +737,8 @@ sub flush {
 
     my $blocks = $Blockbuff{$inode} or return;
 
+    warn "blocks = $blocks";
+
     lock $blocks;
     my $length = $self->file_length($inode);
     my $hwm = 0;  # high water mark ;-)
@@ -741,14 +748,13 @@ sub flush {
     eval {
 	$dbh->begin_work;
 	my $sth = $dbh->prepare_cached(<<END) or die $dbh->errstr;
-insert into data (inode,block,contents) values (?,?,?)
- on duplicate key update contents=?
+replace into data (inode,block,contents) values (?,?,?)
 END
 ;
 
 	for my $block (keys %$blocks) {
 	    my $data = $blocks->{$block};
-	    $sth->execute($inode,$block,$data,$data);
+	    $sth->execute($inode,$block,$data);
 	    my $a   = $block * BLOCKSIZE + length($data);
 	    $hwm    = $a if $a > $hwm;
 	}
