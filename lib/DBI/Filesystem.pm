@@ -873,9 +873,10 @@ sub _isdir {
 
 sub utime {
     my $self = shift;
-    my ($path,$atime,$mtime,$uid,$gid) = @_;
+    my ($path,$atime,$mtime) = @_;
+    warn "utime($path,$atime,$mtime)";
     my $inode = $self->path2inode($path) ;
-    $self->check_perm($inode,W_OK,$uid,$gid);
+    $self->check_perm($inode,W_OK);
     my $dbh    = $self->dbh;
     my $sth    = $dbh->prepare_cached($self->_update_utime_sql);
     my $result = $sth->execute($atime,$mtime);

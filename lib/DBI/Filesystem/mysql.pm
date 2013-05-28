@@ -55,7 +55,7 @@ END
 }
 
 sub _timestamp_sql {
-    return 'unix_timestamp()';
+    return 'now()';
 }
 
 sub _update_utime_sql {
