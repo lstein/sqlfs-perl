@@ -66,7 +66,7 @@ sub _create_inode_sql {
 }
 
 sub _update_utime_sql {
-    return "update metadata set atime=?,mtime=?";
+    return "update metadata set atime=?,mtime=? where inode=?";
 }
 
 1;

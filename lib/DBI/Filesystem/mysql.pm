@@ -12,9 +12,9 @@ create table metadata (
     links        int(10)      default 0,
     inuse        int(10)      default 0,
     length       bigint       default 0,
-    mtime        timestamp,
-    ctime        timestamp,
-    atime        timestamp
+    mtime        timestamp    default 0,
+    ctime        timestamp    default 0,
+    atime        timestamp    default 0
 ) ENGINE=INNODB
 END
 }
@@ -44,14 +44,20 @@ END
 sub _fstat_sql {
     my $self  = shift;
     my $inode = shift;
+    my $times = join ',',map{$self->_unixtime_sql($_)} 'ctime','mtime','atime';
     return <<END;
 select n.inode,mode,uid,gid,links,
-       unix_timestamp(ctime),unix_timestamp(mtime),unix_timestamp(atime),
-       length
+       $times,length
  from metadata as n
  left join data as c on (n.inode=c.inode)
  where n.inode=$inode
 END
+}
+
+sub _unixtime_sql {
+    my $self  = shift;
+    my $field = shift;
+    return "unix_timestamp($field)";
 }
 
 sub _timestamp_sql {
@@ -59,7 +65,7 @@ sub _timestamp_sql {
 }
 
 sub _update_utime_sql {
-    return "update metadata set atime=from_unixtime(?),mtime=from_unixtime(?)";
+    return "update metadata set atime=from_unixtime(?),mtime=from_unixtime(?) where inode=?";
 }
 
 sub _create_inode_sql {

@@ -38,7 +38,7 @@ use IO::Handle;
 
 use constant MAX_PATH_LEN => 4096;  # characters
 use constant BLOCKSIZE    => 4096;  # bytes
-use constant FLUSHBLOCKS  => 64;    # flush after we've accumulated this many cached blocks
+use constant FLUSHBLOCKS  => 32;    # flush after we've accumulated this many cached blocks
 
 my %Blockbuff :shared;
 
@@ -146,7 +146,7 @@ sub e_mknod {
 sub e_create {
     my $path = fixup(shift);
     my ($mode,$flags) = @_;
-#    warn sprintf("create(%s,0%o,0%o)",$path,$mode,$flags);
+    warn sprintf("create(%s,0%o,0%o)",$path,$mode,$flags);
     my $ctx            = fuse_get_context;
     my $umask          = $ctx->{umask};
     my $fh = eval {
@@ -159,7 +159,7 @@ sub e_create {
 
 sub e_open {
     my ($path,$flags,$info) = @_;
-#    warn sprintf("open(%s,0%o,%s)",$path,$flags,$info);
+    warn sprintf("open(%s,0%o,%s)",$path,$flags,$info);
     $path    = fixup($path);
     my $fh = eval {$Self->open($path,$flags,$info)};
     return $Self->errno($@) if $@;
@@ -341,6 +341,7 @@ sub create_path {
 
     $dbh->do("update metadata set links=links+1 where inode=$inode");
     $dbh->do("update metadata set links=links+1 where inode=$parent");
+    $self->touch($parent,'ctime');
 }
 
 sub create_inode_and_path {
@@ -361,8 +362,8 @@ sub create_inode_and_path {
 	$dbh->commit;
     };
     if ($@) {
-	warn "commit failed due to $@";
 	eval{$dbh->rollback()};
+	die "commit failed due to $@";
     }
     return $inode;
 }
@@ -413,8 +414,8 @@ sub unlink_inode {
 	$dbh->commit;
     };
     if ($@) {
-	warn "commit aborted due to $@";
 	eval {$dbh->rollback};
+	die "commit aborted due to $@";
     }
 }
 
@@ -429,8 +430,9 @@ sub remove_dir {
     my $dbh   = $self->dbh;
     eval {
 	$dbh->begin_work;
-	$dbh->do("update metadata set links=links-1 where inode=$inode");
-	$dbh->do("update metadata set links=links-1 where inode=$parent");
+	my $now = $self->_timestamp_sql;
+	$dbh->do("update metadata set links=links-1,ctime=$now where inode=$inode");
+	$dbh->do("update metadata set links=links-1,ctime=$now where inode=$parent");
 	$dbh->do("delete from path where inode=$inode");
 	$self->unlink_inode($inode);
 	$dbh->commit;
@@ -458,6 +460,7 @@ sub chown {
 	$dbh->begin_work();
 	$dbh->do("update metadata set uid=$uid where inode=$inode") if $uid!=0xffffffff;
 	$dbh->do("update metadata set gid=$gid where inode=$inode") if $gid!=0xffffffff;
+	$self->touch($inode,'ctime');
 	$dbh->commit();
     };
     if ($@) {
@@ -472,7 +475,8 @@ sub chmod {
     my $inode        = $self->path2inode($path) ;
     my $dbh          = $self->dbh;
     my $f000         = 0xf000;
-    return $dbh->do("update metadata set mode=(($f000&mode)|$mode) where inode=$inode");
+    my $now          = $self->_timestamp_sql;
+    return $dbh->do("update metadata set mode=(($f000&mode)|$mode),ctime=$now where inode=$inode");
 }
 
 sub fstat {
@@ -520,59 +524,64 @@ sub read {
     my $first_block = int($offset / BLOCKSIZE);
     my $last_block  = int(($offset+$length) / BLOCKSIZE);
     my $start       = $offset % BLOCKSIZE;
-    my $data = '';
     
-    my $current_length = $self->file_length($inode);
+    $self->flush(undef,$inode);
+    my $get_atime = $self->_unixtime_sql('atime');
+    my $get_mtime = $self->_unixtime_sql('mtime');
+    my ($current_length,$atime,$mtime) = 
+	$self->dbh->selectrow_array("select length,$get_atime,$get_mtime from metadata where inode=$inode");
     if ($length+$offset > $current_length) {
 	$length = $current_length - $offset;
     }
-    return $Blockbuff{$inode} ? $self->_read_cached($Blockbuff{$inode},$inode,$start,$length,$first_block,$last_block)
-	                      : $self->_read_direct(                   $inode,$start,$length,$first_block,$last_block);
+    my $data = $self->_read_direct($inode,$start,$length,$first_block,$last_block);
+    $self->touch($inode,'atime') if length $data && $atime < $mtime;
+    return $data;
 }
 
 # This type of read checks the write buffer for cached data.
 # If cached doesn't exist, then performs one SQL query for each block.
-sub _read_cached {
-    my $self = shift;
-    my ($blocks,$inode,$start,$length,$first_block,$last_block) = @_;
+# COMMENTED BECAUSE IT ACTUALLY SLOWS PERFORMANCE!
+# sub _read_cached {
+#     my $self = shift;
+#     my ($blocks,$inode,$start,$length,$first_block,$last_block) = @_;
 
-    my $dbh = $self->dbh;
-    my $sth = $dbh->prepare_cached(<<END);
-select contents 
-   from data where inode=? 
-   and block=?
-END
-;
-    my $previous_block;
-    my $data = '';
-    for (my $block=$first_block;$block<=$last_block;$block++) {
-	my $contents;
-	if ($blocks->{$block}) {
-	    $contents = $blocks->{$block};
-	} else {
-	    $sth->execute($inode,$block);
-	    ($contents) = $sth->fetchrow_array;
-	}
-	next unless length $contents;
+#     my $dbh = $self->dbh;
+#     my $sth = $dbh->prepare_cached(<<END);
+# select contents 
+#    from data where inode=? 
+#    and block=?
+# END
+# ;
+#     my $previous_block;
+#     my $data = '';
+#     for (my $block=$first_block;$block<=$last_block;$block++) {
+# 	my $contents;
+# 	if ($blocks->{$block}) {
+# 	    $contents = $blocks->{$block};
+# 	} else {
+# 	    $sth->execute($inode,$block);
+# 	    ($contents) = $sth->fetchrow_array;
+# 	}
+# 	next unless length $contents;
 
-	$previous_block = $block unless defined $previous_block;
-	# a hole spanning an entire block
-	if ($block - $previous_block > 1) {
-	    $data .= "\0"x(BLOCKSIZE*($block-$previous_block-1));
-	}
-	$previous_block = $block;
+# 	$previous_block = $block unless defined $previous_block;
+# 	# a hole spanning an entire block
+# 	if ($block - $previous_block > 1) {
+# 	    $data .= "\0"x(BLOCKSIZE*($block-$previous_block-1));
+# 	}
+# 	$previous_block = $block;
 	
-	# a hole spanning a portion of a block
-	if (length $contents < BLOCKSIZE && $block < $last_block) {
-	    $contents .= "\0"x(BLOCKSIZE-length($contents));  # this is a hole!
-	}
-	$data      .= substr($contents,$start,$length);
-	$length    -= BLOCKSIZE;
-	$start      = 0;
-    }
-    $sth->finish;
-    return $data;
-}
+# 	# a hole spanning a portion of a block
+# 	if (length $contents < BLOCKSIZE && $block < $last_block) {
+# 	    $contents .= "\0"x(BLOCKSIZE-length($contents));  # this is a hole!
+# 	}
+# 	$data      .= substr($contents,$start,$length);
+# 	$length    -= BLOCKSIZE;
+# 	$start      = 0;
+#     }
+#     $sth->finish;
+#     return $data;
+# }
 
 # This type of read is invoked when there is no write buffer for
 # the file. It executes a single SQL query across the data table.
@@ -622,10 +631,11 @@ sub file_length {
 sub open {
     my $self = shift;
     my ($path,$flags,$info,$uid,$gid) = @_;
+    warn "open(@_)";
     my $inode  = $self->path2inode($path);
     $self->check_open_perm($inode,$flags,$uid,$gid);
     # mtime=mtime to avoid updating the modification time!
-    $self->dbh->do("update metadata set inuse=inuse+1,mtime=mtime where inode=$inode");
+    $self->dbh->do("update metadata set inuse=inuse+1 where inode=$inode");
     return $inode;
 }
 
@@ -710,7 +720,7 @@ sub release {
     $self->flush(undef,$inode);  # write cached blocks
     my $dbh = $self->dbh;
     # mtime=mtime to avoid updating the modification time!
-    $dbh->do("update metadata set inuse=inuse-1,mtime=mtime where inode=$inode");
+    $dbh->do("update metadata set inuse=inuse-1 where inode=$inode");
     $self->unlink_inode($inode);
     return 0;
 }
@@ -809,13 +819,14 @@ END
 	    $hwm    = $a if $a > $hwm;
 	}
 	$sth->finish;
-	$dbh->do("update metadata set length=$hwm where inode=$inode");
+	my $now = $self->_timestamp_sql;
+	$dbh->do("update metadata set length=$hwm,mtime=$now where inode=$inode");
 	$dbh->commit();
     };
 
     if ($@) {
-	warn "write failed with $@";
 	eval{$dbh->rollback()};
+	warn "write failed with $@";
 	return;
     }
 
@@ -844,6 +855,7 @@ sub truncate {
 	$dbh->do("delete from data where inode=$inode and block>$last_block");
 	$dbh->do("update data set contents=substr(contents,1,$trunc) where inode=$inode and block=$last_block");
 	$dbh->do("update metadata set length=$length where inode=$inode");
+	$self->touch($inode,'mtime');
 	$dbh->commit;
     };
     if ($@) {
@@ -874,14 +886,20 @@ sub _isdir {
 sub utime {
     my $self = shift;
     my ($path,$atime,$mtime) = @_;
-    warn "utime($path,$atime,$mtime)";
     my $inode = $self->path2inode($path) ;
     $self->check_perm($inode,W_OK);
     my $dbh    = $self->dbh;
     my $sth    = $dbh->prepare_cached($self->_update_utime_sql);
-    my $result = $sth->execute($atime,$mtime);
+    my $result = $sth->execute($atime,$mtime,$inode);
     $sth->finish();
     return $result;
+}
+
+sub touch {
+    my $self  = shift;
+    my ($inode,$field) = @_;
+    my $now = $self->_timestamp_sql;
+    $self->dbh->do("update metadata set $field=$now where inode=$inode");
 }
 
 sub getdir {
