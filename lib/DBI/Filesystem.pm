@@ -441,7 +441,7 @@ sub remove_dir {
     my $dbh   = $self->dbh;
     eval {
 	$dbh->begin_work;
-	my $now = $self->_timestamp_sql;
+	my $now = $self->_now_sql;
 	$dbh->do("update metadata set links=links-1,ctime=$now where inode=$inode");
 	$dbh->do("update metadata set links=links-1,ctime=$now where inode=$parent");
 	$dbh->do("delete from path where inode=$inode");
@@ -488,7 +488,7 @@ sub chmod {
     my $inode        = $self->path2inode($path) ;
     my $dbh          = $self->dbh;
     my $f000         = 0xf000;
-    my $now          = $self->_timestamp_sql;
+    my $now          = $self->_now_sql;
     return $dbh->do("update metadata set mode=(($f000&mode)|$mode),ctime=$now where inode=$inode");
 }
 
@@ -539,8 +539,8 @@ sub read {
     my $start       = $offset % BLOCKSIZE;
     
     $self->flush(undef,$inode);
-    my $get_atime = $self->_unixtime_sql('atime');
-    my $get_mtime = $self->_unixtime_sql('mtime');
+    my $get_atime = $self->_get_unix_timestamp_sql('atime');
+    my $get_mtime = $self->_get_unix_timestamp_sql('mtime');
     my ($current_length,$atime,$mtime) = 
 	$self->dbh->selectrow_array("select length,$get_atime,$get_mtime from metadata where inode=$inode");
     if ($length+$offset > $current_length) {
@@ -831,7 +831,7 @@ END
 	    $hwm    = $a if $a > $hwm;
 	}
 	$sth->finish;
-	my $now = $self->_timestamp_sql;
+	my $now = $self->_now_sql;
 	$dbh->do("update metadata set length=$hwm,mtime=$now where inode=$inode");
 	$dbh->commit();
     };
@@ -910,7 +910,7 @@ sub utime {
 sub touch {
     my $self  = shift;
     my ($inode,$field) = @_;
-    my $now = $self->_timestamp_sql;
+    my $now = $self->_now_sql;
     $self->dbh->do("update metadata set $field=$now where inode=$inode");
 }
 
@@ -1024,7 +1024,7 @@ sub _initialize_schema {
     my $uid = $<;
     my $gid = $(;
     $gid    =~ s/ .+$//;
-    my $timestamp = $self->_timestamp_sql();
+    my $timestamp = $self->_now_sql();
     $dbh->do("insert into metadata (inode,mode,uid,gid,links,mtime,ctime,atime) values(1,$mode,$uid,$gid,2,$timestamp,$timestamp,$timestamp)") 
 	or croak $dbh->errstr;
     $dbh->do("insert into path (inode,name,parent) values (1,'/',null)")
@@ -1049,6 +1049,26 @@ sub _get_groups {
     }
     endgrent;
     return \%result;
+}
+
+################# a few SQL fragments; most are inline or in the DBD-specific descendents ######
+sub _fstat_sql {
+    my $self  = shift;
+    my $inode = shift;
+    my $times = join ',',map{$self->_get_unix_timestamp_sql($_)} 'ctime','mtime','atime';
+    return <<END;
+select n.inode,mode,uid,gid,links,
+       $times,length
+ from metadata as n
+ left join data as c on (n.inode=c.inode)
+ where n.inode=$inode
+END
+}
+
+sub _create_inode_sql {
+    my $self = shift;
+    my $now = $self->_now_sql;
+    return "insert into metadata (mode,uid,gid,links,mtime,ctime,atime) values(?,?,?,?,$now,$now,$now)";
 }
 
 1;

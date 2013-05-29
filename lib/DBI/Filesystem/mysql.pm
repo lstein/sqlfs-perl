@@ -41,37 +41,18 @@ create table data (
 END
 }
 
-sub _fstat_sql {
-    my $self  = shift;
-    my $inode = shift;
-    my $times = join ',',map{$self->_unixtime_sql($_)} 'ctime','mtime','atime';
-    return <<END;
-select n.inode,mode,uid,gid,links,
-       $times,length
- from metadata as n
- left join data as c on (n.inode=c.inode)
- where n.inode=$inode
-END
-}
-
-sub _unixtime_sql {
+sub _get_unix_timestamp_sql {
     my $self  = shift;
     my $field = shift;
     return "unix_timestamp($field)";
 }
 
-sub _timestamp_sql {
+sub _now_sql {
     return 'now()';
 }
 
 sub _update_utime_sql {
     return "update metadata set atime=from_unixtime(?),mtime=from_unixtime(?) where inode=?";
-}
-
-sub _create_inode_sql {
-    my $self = shift;
-    my $now = $self->_timestamp_sql;
-    return "insert into metadata (mode,uid,gid,links,mtime,ctime,atime) values(?,?,?,?,$now,$now,$now)";
 }
 
 1;
