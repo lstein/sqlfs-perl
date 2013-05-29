@@ -4,8 +4,20 @@ use strict;
 use warnings;
 use base 'DBI::Filesystem';
 
-sub blocksize   { return 16384 }
+#sub blocksize   { return 16384 }
 sub flushblocks { return   256 }
+
+sub dbh {
+     my $self = shift;
+     my $dsn  = $self->dsn;
+     return $self->{dbh} if $self->{dbh};
+     my $dbh = DBI->connect($dsn,
+			    undef,undef,
+			    {RaiseError=>1,
+			     AutoCommit=>1}) or croak DBI->errstr;
+     $dbh->do('PRAGMA synchronous = OFF') or die $dbh->errstr;
+     return $self->{dbh} = $dbh;
+}
 
 sub _metadata_table_def {
     return <<END;
