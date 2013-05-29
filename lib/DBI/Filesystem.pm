@@ -159,7 +159,7 @@ sub e_create {
 
 sub e_open {
     my ($path,$flags,$info) = @_;
-    warn sprintf("open(%s,0%o,%s)",$path,$flags,$info);
+#    warn sprintf("open(%s,0%o,%s)",$path,$flags,$info);
     $path    = fixup($path);
     my $fh = eval {$Self->open($path,$flags,$info)};
     return $Self->errno($@) if $@;
@@ -342,6 +342,7 @@ sub create_path {
     $dbh->do("update metadata set links=links+1 where inode=$inode");
     $dbh->do("update metadata set links=links+1 where inode=$parent");
     $self->touch($parent,'ctime');
+    $self->touch($parent,'mtime');
 }
 
 sub create_inode_and_path {
@@ -396,8 +397,18 @@ sub unlink_file {
 	or die $dbh->errstr;
     $sth->execute($inode,$parent,$name) or die $dbh->errstr;
 
-    $dbh->do("update metadata set links=links-1 where inode=$inode");
-    $dbh->do("update metadata set links=links-1 where inode=$parent");
+    eval {
+	$dbh->begin_work();
+	$dbh->do("update metadata set links=links-1 where inode=$inode");
+	$dbh->do("update metadata set links=links-1 where inode=$parent");
+	$self->touch($parent,'mtime');
+	$self->touch($parent,'ctime');
+	$dbh->commit();
+    };
+    if ($@) {
+	eval {$dbh->rollback()};
+	die "unlink failed due to $@";
+    }
     $self->unlink_inode($inode);
 }
 
@@ -434,6 +445,8 @@ sub remove_dir {
 	$dbh->do("update metadata set links=links-1,ctime=$now where inode=$inode");
 	$dbh->do("update metadata set links=links-1,ctime=$now where inode=$parent");
 	$dbh->do("delete from path where inode=$inode");
+	$self->touch($parent,'ctime');
+	$self->touch($parent,'mtime');
 	$self->unlink_inode($inode);
 	$dbh->commit;
     };
