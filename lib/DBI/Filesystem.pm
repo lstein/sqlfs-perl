@@ -146,12 +146,12 @@ sub e_mknod {
 sub e_create {
     my $path = fixup(shift);
     my ($mode,$flags) = @_;
-    warn sprintf("create(%s,0%o,0%o)",$path,$mode,$flags);
+    # warn sprintf("create(%s,0%o,0%o)",$path,$mode,$flags);
     my $ctx            = fuse_get_context;
     my $umask          = $ctx->{umask};
     my $fh = eval {
 	$Self->create_file($path,$mode&(~$umask),$ctx->{uid},$ctx->{gid});
-	$Self->open($path,$flags,{},$ctx->{uid},$ctx->{gid});
+	$Self->open($path,$flags,{});
     };
     return $Self->errno($@) if $@;
     return (0,$fh);
@@ -630,10 +630,9 @@ sub file_length {
 
 sub open {
     my $self = shift;
-    my ($path,$flags,$info,$uid,$gid) = @_;
-    warn "open(@_)";
+    my ($path,$flags,$info) = @_;
     my $inode  = $self->path2inode($path);
-    $self->check_open_perm($inode,$flags,$uid,$gid);
+    $self->check_open_perm($inode,$flags);
     # mtime=mtime to avoid updating the modification time!
     $self->dbh->do("update metadata set inuse=inuse+1 where inode=$inode");
     return $inode;
