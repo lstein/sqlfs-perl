@@ -817,17 +817,29 @@ sub flush {
     my $blksize = $self->blocksize;
 
     lock $blocks;
+    my $result = $self->_write_blocks($inode,$blocks,$blksize);
+
+    delete $Blockbuff{$inode} if $result;
+}
+
+sub _write_blocks {
+    my $self = shift;
+    my ($inode,$blocks,$blksize) = @_;
+
     my $dbh = $self->dbh;
     my ($length) = $dbh->selectrow_array("select length from metadata where inode=$inode");
     my $hwm      = $length;  # high water mark ;-)
 
+
+#    my $tuples = join ',',('(?,?,?)')x(keys %$blocks);
     eval {
 	$dbh->begin_work;
 	my $sth = $dbh->prepare_cached(<<END) or die $dbh->errstr;
 replace into data (inode,block,contents) values (?,?,?)
 END
 ;
-
+	#my @bind = map {($inode,$_,$blocks->{$_})} keys %$blocks;
+	# $sth->execute(@bind);
 	for my $block (keys %$blocks) {
 	    my $data = $blocks->{$block};
 	    $sth->execute($inode,$block,$data);
@@ -846,8 +858,7 @@ END
 	return;
     }
 
-#    %{$Blockbuff{$inode}}=();
-    delete $Blockbuff{$inode};
+    1;
 }
 
 sub truncate {

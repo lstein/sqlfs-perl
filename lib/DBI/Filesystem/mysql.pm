@@ -41,6 +41,44 @@ create table data (
 END
 }
 
+# mysql-specific optimization
+sub _write_blocks {
+    my $self = shift;
+    my ($inode,$blocks,$blksize) = @_;
+
+    my $dbh = $self->dbh;
+    my ($length) = $dbh->selectrow_array("select length from metadata where inode=$inode");
+    my $hwm      = $length;  # high water mark ;-)
+
+
+    my $tuples = join ',',('(?,?,?)')x(keys %$blocks);
+    eval {
+	$dbh->begin_work;
+	my $sth = $dbh->prepare_cached(<<END) or die $dbh->errstr;
+replace into data (inode,block,contents) values $tuples
+END
+;
+	my @bind = map {($inode,$_,$blocks->{$_})} keys %$blocks;
+	$sth->execute(@bind);
+	for my $block (keys %$blocks) {
+	    my $a   = $block * $blksize + length($blocks->{$data});
+	    $hwm    = $a if $a > $hwm;
+	}
+	$sth->finish;
+	my $now = $self->_now_sql;
+	$dbh->do("update metadata set length=$hwm,mtime=$now where inode=$inode");
+	$dbh->commit();
+    };
+
+    if ($@) {
+	eval{$dbh->rollback()};
+	warn "write failed with $@";
+	return;
+    }
+
+    1;
+}
+
 sub _get_unix_timestamp_sql {
     my $self  = shift;
     my $field = shift;
