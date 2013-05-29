@@ -4,6 +4,9 @@ use strict;
 use warnings;
 use base 'DBI::Filesystem';
 
+sub blocksize   { return 16384 }
+sub flushblocks { return   256 }
+
 sub _metadata_table_def {
     return <<END;
 create table metadata (

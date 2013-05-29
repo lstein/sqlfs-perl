@@ -37,8 +37,8 @@ use Symbol 'gensym';
 use IO::Handle;
 
 use constant MAX_PATH_LEN => 4096;  # characters
-use constant BLOCKSIZE    => 4096;  # bytes
-use constant FLUSHBLOCKS  => 32;    # flush after we've accumulated this many cached blocks
+use constant BLOCKSIZE    => 16384;  # bytes
+use constant FLUSHBLOCKS  => 256;    # flush after we've accumulated this many cached blocks
 
 my %Blockbuff :shared;
 
@@ -506,14 +506,14 @@ sub fstat {
 	lock $blocks; 
 	if (keys %$blocks) { 
 	    my ($biggest) = sort {$b<=>$a} keys %$blocks; 
-	    my $offset    = BLOCKSIZE * $biggest + length $blocks->{$biggest}; 
+	    my $offset    = $self->blocksize * $biggest + length $blocks->{$biggest}; 
 	    $size         = $offset if $offset > $size;
 	}
     }
 
     my $dev     = 0;
     my $blocks  = 1;
-    my $blksize = BLOCKSIZE;
+    my $blksize = $self->blocksize;
     return ($dev,$ino,$mode,$nlinks,$uid,$gid,0,$size,$atime,$mtime,$ctime,$blksize,$blocks);
 }
 
@@ -534,9 +534,10 @@ sub read {
     }
     $offset  ||= 0;
 
-    my $first_block = int($offset / BLOCKSIZE);
-    my $last_block  = int(($offset+$length) / BLOCKSIZE);
-    my $start       = $offset % BLOCKSIZE;
+    my $blksize     = $self->blocksize;
+    my $first_block = int($offset / $blksize);
+    my $last_block  = int(($offset+$length) / $blksize);
+    my $start       = $offset % $blksize;
     
     $self->flush(undef,$inode);
     my $get_atime = $self->_get_unix_timestamp_sql('atime');
@@ -612,22 +613,23 @@ END
 ;
     $sth->execute($inode,$first_block,$last_block);
 
+    my $blksize     = $self->blocksize;
     my $previous_block;
     my $data = '';
     while (my ($block,$contents) = $sth->fetchrow_array) {
 	$previous_block = $block unless defined $previous_block;
 	# a hole spanning an entire block
 	if ($block - $previous_block > 1) {
-	    $data .= "\0"x(BLOCKSIZE*($block-$previous_block-1));
+	    $data .= "\0"x($blksize*($block-$previous_block-1));
 	}
 	$previous_block = $block;
 	
 	# a hole spanning a portion of a block
-	if (length $contents < BLOCKSIZE && $block < $last_block) {
-	    $contents .= "\0"x(BLOCKSIZE-length($contents));  # this is a hole!
+	if (length $contents < $blksize && $block < $last_block) {
+	    $contents .= "\0"x($blksize-length($contents));  # this is a hole!
 	}
 	$data      .= substr($contents,$start,$length);
-	$length    -= BLOCKSIZE;
+	$length    -= $blksize;
 	$start      = 0;
     }
     $sth->finish();
@@ -748,8 +750,9 @@ sub write {
 
     $offset  ||= 0;
 
-    my $first_block    = int($offset / BLOCKSIZE);
-    my $start          = $offset % BLOCKSIZE;
+    my $blksize        = $self->blocksize;
+    my $first_block    = int($offset / $blksize);
+    my $start          = $offset % $blksize;
 
     my $block          = $first_block;
     my $bytes_to_write = length $data;
@@ -763,10 +766,10 @@ sub write {
 
     my $dbh            = $self->dbh;
     while ($bytes_to_write > 0) {
-	my $bytes          = BLOCKSIZE > ($bytes_to_write+$start) ? $bytes_to_write : (BLOCKSIZE-$start);
+	my $bytes          = $blksize > ($bytes_to_write+$start) ? $bytes_to_write : ($blksize-$start);
 	my $current_length = length($blocks->{$block}||'');
 
-	if ($bytes < BLOCKSIZE && !$current_length) {  # partial block replacement, and not currently cached
+	if ($bytes < $blksize && !$current_length) {  # partial block replacement, and not currently cached
 	    my $sth = $dbh->prepare_cached('select contents,length(contents) from data where inode=? and block=?');
 	    $sth->execute($inode,$block);
 	    ($blocks->{$block},$current_length) = $sth->fetchrow_array();
@@ -791,7 +794,7 @@ sub write {
 	$bytes_written  += $bytes;
 	$bytes_to_write -= $bytes;
     }
-    $self->flush(undef,$inode) if keys %$blocks > FLUSHBLOCKS;
+    $self->flush(undef,$inode) if keys %$blocks > $self->flushblocks;
     return $bytes_written;
 }
 
@@ -810,7 +813,8 @@ sub flush {
 	return;
     }
 
-    my $blocks = $Blockbuff{$inode} or return;
+    my $blocks  = $Blockbuff{$inode} or return;
+    my $blksize = $self->blocksize;
 
     lock $blocks;
     my $dbh = $self->dbh;
@@ -827,7 +831,7 @@ END
 	for my $block (keys %$blocks) {
 	    my $data = $blocks->{$block};
 	    $sth->execute($inode,$block,$data);
-	    my $a   = $block * BLOCKSIZE + length($data);
+	    my $a   = $block * $blksize + length($data);
 	    $hwm    = $a if $a > $hwm;
 	}
 	$sth->finish;
@@ -860,8 +864,8 @@ sub truncate {
     my @stat   = $self->stat($path);
     $stat[7] >= $length or croak "length beyond end of file";
 
-    my $last_block = int($length/BLOCKSIZE);
-    my $trunc      = $length % BLOCKSIZE;
+    my $last_block = int($length/$self->blocksize);
+    my $trunc      = $length % $self->blocksize;
     eval {
 	$dbh->begin_work;
 	$dbh->do("delete from data where inode=$inode and block>$last_block");
@@ -1070,6 +1074,9 @@ sub _create_inode_sql {
     my $now = $self->_now_sql;
     return "insert into metadata (mode,uid,gid,links,mtime,ctime,atime) values(?,?,?,?,$now,$now,$now)";
 }
+
+sub blocksize   { return 4096 }
+sub flushblocks { return   64 }
 
 1;
 
