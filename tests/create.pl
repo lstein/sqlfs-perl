@@ -17,12 +17,16 @@ $fs->create_file('/foo.mpg');
 $fs->create_file('/one/foo.mpg');
 $fs->create_file('/one/bar.mpg');
 $fs->create_file('/two/subdirectory_two/subdirectory_two_two/deep.mpg');
+$fs->create_hardlink('/two/subdirectory_two/subdirectory_two_two/deep.mpg','/one/subdirectory_one/bar.mpg');
+my $inode = $fs->path2inode('/two/subdirectory_two/subdirectory_two_two/deep.mpg');
+my @paths = $fs->inode2paths($inode);
+print join(',',@paths),"\n";
 
-print join ',',$fs->entries('/'),"\n";
-print join ',',$fs->entries('/one'),"\n";
-print join ',',$fs->entries('/one/'),"\n";
-print join ',',$fs->entries('/one/subdirectory_one'),"\n";
-print join ',',$fs->entries('/two/subdirectory_two/subdirectory_two_two'),"\n";
+print join ',',$fs->getdir('/'),"\n";
+print join ',',$fs->getdir('/one'),"\n";
+print join ',',$fs->getdir('/one/'),"\n";
+print join ',',$fs->getdir('/one/subdirectory_one'),"\n";
+print join ',',$fs->getdir('/two/subdirectory_two/subdirectory_two_two'),"\n";
 my @stat = $fs->stat('/two/subdirectory_two/subdirectory_two_two/deep.mpg');
 print join(",",@stat),"\n";
 

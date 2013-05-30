@@ -67,6 +67,7 @@ sub mount {
     my $pkg  = __PACKAGE__;
 
     $Self = $self;  # because entrypoints cannot be passed as closures
+    $self->mounted(1);
     Fuse::main(mountpoint  => $mtpt,
 	       mountopts   => 'hard_remove,allow_other',
 	       getdir      => "$pkg\:\:e_getdir",
@@ -90,11 +91,19 @@ sub mount {
 	       readlink    => "$pkg\:\:e_readlink",
 	       unlink      => "$pkg\:\:e_unlink",
 	       utime       => "$pkg\:\:e_utime",
+	       init        => "$pkg\:\:e_init",
 	       nullpath_ok => 1,
 	       debug       => 0,
-	       threaded    => 1,
+	       threaded    => 0,
 	       %$opts,
 	);
+}
+
+sub mounted {
+    my $self = shift;
+    my $d = $self->{mounted};
+    $self->{mounted} = shift if @_;
+    return $d;
 }
 
 sub fixup {
@@ -128,7 +137,7 @@ sub e_fgetattr {
 sub e_mkdir {
     my $path = fixup(shift);
     my $mode = shift;
-    my $ctx            = fuse_get_context;
+    my $ctx            = $Self->get_context();
     my $umask          = $ctx->{umask};
     eval {$Self->create_directory($path,$mode&(~$umask),$ctx->{uid},$ctx->{gid})};
     return $Self->errno($@) if $@;
@@ -138,7 +147,7 @@ sub e_mkdir {
 sub e_mknod {
     my $path = fixup(shift);
     my ($mode,$device) = @_;
-    my $ctx            = fuse_get_context;
+    my $ctx            = $Self->get_context;
     my $umask          = $ctx->{umask};
     eval {$Self->create_file($path,$mode&(~$umask),$ctx->{uid},$ctx->{gid})};
     return $Self->errno($@) if $@;
@@ -149,7 +158,7 @@ sub e_create {
     my $path = fixup(shift);
     my ($mode,$flags) = @_;
     # warn sprintf("create(%s,0%o,0%o)",$path,$mode,$flags);
-    my $ctx            = fuse_get_context;
+    my $ctx            = $Self->get_context;
     my $umask          = $ctx->{umask};
     my $fh = eval {
 	$Self->create_file($path,$mode&(~$umask),$ctx->{uid},$ctx->{gid});
@@ -363,7 +372,7 @@ sub create_inode_and_path {
     my $parent = $self->path2inode($self->_dirname($path));
     $self->check_perm($parent,W_OK);
 
-    my $ctx = fuse_get_context();
+    my $ctx = $self->get_context;
 
     eval {
 	$dbh->begin_work;
@@ -471,7 +480,7 @@ sub chown {
     my $inode             = $self->path2inode($path) ;
 
     # permission checking here
-    my $ctx = fuse_get_context();
+    my $ctx = $self->get_context;
     die "permission denied" unless $uid == 0xffffffff || $ctx->{uid} == 0;
 
     my $groups            = $self->get_groups(@{$ctx}{'uid','gid'});
@@ -716,7 +725,7 @@ END
 sub check_perm {
     my $self = shift;
     my ($inode,$access_mode) = @_;
-    my $ctx = fuse_get_context();
+    my $ctx = $self->get_context;
     my ($uid,$gid) = @{$ctx}{'uid','gid'};
 
     my $dbh      = $self->dbh;
@@ -730,9 +739,6 @@ sub check_perm {
                      :$groups->{$group} ? $mode >> 3
                      :$mode;
     $perm_word     &= 07;
-
-#    warn sprintf("check_perm(%d): access_mode=0%o, allowed=%d, mode=0%o, owner=%d, group=%d, uid=%d, gid=%d\n",
-#		 $inode,$access_mode,$perm_word & $access_mode,$mode,$owner,$group,$uid,$gid);
 
     $access_mode==($perm_word & $access_mode) or die "permission denied";
     return 0;
@@ -972,7 +978,7 @@ sub path2inode {
     my $path   = shift;
     my ($inode,$p_inode,$name) = $self->_path2inode($path);
 
-    my $ctx = fuse_get_context();
+    my $ctx = $self->get_context;
     $self->check_path($self->_dirname($path),$p_inode,@{$ctx}{'uid','gid'}) or die "permission denied";
     return wantarray ? ($inode,$p_inode,$name) : $inode;
 }
@@ -991,6 +997,37 @@ sub _path2inode {
     my @v      = $sth->fetchrow_array() or croak "$path not found";
     $sth->finish;
     return @v;
+}
+
+# returns a list of paths that correspond to an inode
+# because files can be hardlinked, there may be multiple paths!
+sub inode2paths {
+    my $self   = shift;
+    my $inode  = shift;
+    my $dbh    = $self->dbh;
+    #BUG: inode is not indexed in this table, so this may be slow!
+    # consider adding an index
+    my $sth    = $dbh->prepare_cached('select name,parent from path where inode=?');
+    $sth->execute($inode);
+    my @results;
+    while (my ($name,$parent) = $sth->fetchrow_array) {
+	my $directory = $self->_inode2path($parent);
+	push @results,"$directory/$name";
+    }
+    $sth->finish;
+    return @results;
+}
+
+# recursive walk up the file tree
+# this should only be called on directories, as we know
+# they do not have hard links
+sub _inode2path {
+    my $self  = shift;
+    my $inode = shift;
+    return '' if $inode == 1;
+    my $dbh  = $self->dbh;
+    my ($name,$parent) = $dbh->selectrow_array("select name,parent from path where inode=$inode");
+    return $self->_inode2path($parent)."/".$name;
 }
 
 sub _dirname {
@@ -1042,10 +1079,10 @@ sub _initialize_schema {
 
     # create the root node
     # should update this to use fuse_get_context to get proper uid, gid and masked permissions
-    my $mode = (0040000|0777)&~umask();
-    my $uid = $<;
-    my $gid = $(;
-    $gid    =~ s/ .+$//;
+    my $ctx  = $self->get_context;
+    my $mode = (0040000|0777)&~$ctx->{umask};
+    my $uid = $ctx->{uid};
+    my $gid = $ctx->{gid};
     my $timestamp = $self->_now_sql();
     # potential bug here -- we assume the inode column begins at "1" automatically
     $dbh->do("insert into metadata (mode,uid,gid,links,mtime,ctime,atime) values($mode,$uid,$gid,2,$timestamp,$timestamp,$timestamp)") 
@@ -1072,6 +1109,18 @@ sub _get_groups {
     }
     endgrent;
     return \%result;
+}
+
+sub get_context {
+    my $self = shift;
+    return $self->get_context if $self->mounted;
+    my ($gid) = $( =~ /^(\d+)/;
+    return {
+	uid   => $<,
+	gid   => $gid,
+	pid   => $$,
+	umask => umask()
+    }
 }
 
 ################# a few SQL fragments; most are inline or in the DBD-specific descendents ######
