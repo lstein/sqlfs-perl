@@ -62,16 +62,23 @@ my $Self;   # because entrypoints cannot be passed as closures
 sub mount {
     my $self = shift;
     my $mtpt = shift or croak "Usage: mount(\$mountpoint)";
-    my $opts = shift;
+    my $fuse_opts = shift;
 
-    warn join ' ',%$opts;
+    $fuse_opts ||= {};
+
+    if ($fuse_opts->{mountopts}) {
+	my %o = map {$_=>1} split ',',$fuse_opts->{mountopts};
+	%o    = (hard_remove=>1,%o);
+	$fuse_opts->{mountopts} = join ',',keys %o;
+    } else {
+	$fuse_opts->{mountopts} = 'hard_remove';
+    }
 
     my $pkg  = __PACKAGE__;
 
     $Self = $self;  # because entrypoints cannot be passed as closures
     $self->mounted(1);
     Fuse::main(mountpoint  => $mtpt,
-	       mountopts   => 'hard_remove,allow_other',
 	       getdir      => "$pkg\:\:e_getdir",
 	       getattr     => "$pkg\:\:e_getattr",
 	       fgetattr    => "$pkg\:\:e_fgetattr",
@@ -95,8 +102,8 @@ sub mount {
 	       utime       => "$pkg\:\:e_utime",
 	       nullpath_ok => 1,
 	       debug       => 0,
-	       threaded    => 0,
-	       %$opts,
+	       threaded    => 1,
+	       %$fuse_opts,
 	);
 }
 
