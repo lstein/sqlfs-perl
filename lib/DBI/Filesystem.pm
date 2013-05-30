@@ -147,7 +147,7 @@ sub e_mkdir {
     my $mode = shift;
     my $ctx            = $Self->get_context();
     my $umask          = $ctx->{umask};
-    eval {$Self->create_directory($path,$mode&(~$umask),$ctx->{uid},$ctx->{gid})};
+    eval {$Self->create_directory($path,$mode&(~$umask))};
     return $Self->errno($@) if $@;
     return 0;
 }
@@ -157,7 +157,7 @@ sub e_mknod {
     my ($mode,$device) = @_;
     my $ctx            = $Self->get_context;
     my $umask          = $ctx->{umask};
-    eval {$Self->create_file($path,$mode&(~$umask),$ctx->{uid},$ctx->{gid})};
+    eval {$Self->create_file($path,$mode&(~$umask))};
     return $Self->errno($@) if $@;
     return 0;
 }
@@ -169,7 +169,7 @@ sub e_create {
     my $ctx            = $Self->get_context;
     my $umask          = $ctx->{umask};
     my $fh = eval {
-	$Self->create_file($path,$mode&(~$umask),$ctx->{uid},$ctx->{gid});
+	$Self->create_file($path,$mode&(~$umask));
 	$Self->open($path,$flags,{});
     };
     return $Self->errno($@) if $@;
@@ -398,7 +398,7 @@ sub create_inode_and_path {
 sub create_file { 
     my $self = shift;
     my ($path,$mode,$uid,$gid) = @_;
-    $self->create_inode_and_path($path,'f',$mode,$uid,$gid);
+    $self->create_inode_and_path($path,'f',$mode);
 }
 
 sub create_directory {
