@@ -168,7 +168,8 @@ sub e_open {
 
 sub e_release {
     my ($path,$flags,$fh) = @_;
-    $Self->release($fh);
+    eval {$Self->release($fh)};
+    return $Self->errno($@) if $@;
     return 0;
 }
  
@@ -299,6 +300,12 @@ sub create_inode {
     my $sth = $dbh->prepare_cached($self->_create_inode_sql);
     $sth->execute($mode,$uid,$gid,$type eq 'd' ? 1 : 0) or die $sth->errstr;
     $sth->finish;
+    return $self->last_inserted_inode($dbh);
+}
+
+sub last_inserted_inode {
+    my $self = shift;
+    my $dbh  = shift;
     return $dbh->last_insert_id(undef,undef,undef,undef);
 }
 
@@ -817,9 +824,9 @@ sub flush {
     my $blksize = $self->blocksize;
 
     lock $blocks;
-    my $result = $self->_write_blocks($inode,$blocks,$blksize);
+    my $result = $self->_write_blocks($inode,$blocks,$blksize) or die "flush failed";
 
-    delete $Blockbuff{$inode} if $result;
+    delete $Blockbuff{$inode};
 }
 
 sub _write_blocks {
@@ -830,16 +837,12 @@ sub _write_blocks {
     my ($length) = $dbh->selectrow_array("select length from metadata where inode=$inode");
     my $hwm      = $length;  # high water mark ;-)
 
-
-#    my $tuples = join ',',('(?,?,?)')x(keys %$blocks);
     eval {
 	$dbh->begin_work;
 	my $sth = $dbh->prepare_cached(<<END) or die $dbh->errstr;
 replace into data (inode,block,contents) values (?,?,?)
 END
 ;
-	#my @bind = map {($inode,$_,$blocks->{$_})} keys %$blocks;
-	# $sth->execute(@bind);
 	for my $block (keys %$blocks) {
 	    my $data = $blocks->{$block};
 	    $sth->execute($inode,$block,$data);
@@ -853,8 +856,10 @@ END
     };
 
     if ($@) {
+	my $msg = $@;
 	eval{$dbh->rollback()};
-	warn "write failed with $@";
+	warn $msg;
+	die "write failed with $msg";
 	return;
     }
 
@@ -1040,7 +1045,8 @@ sub _initialize_schema {
     my $gid = $(;
     $gid    =~ s/ .+$//;
     my $timestamp = $self->_now_sql();
-    $dbh->do("insert into metadata (inode,mode,uid,gid,links,mtime,ctime,atime) values(1,$mode,$uid,$gid,2,$timestamp,$timestamp,$timestamp)") 
+    # potential bug here -- we assume the inode column begins at "1" automatically
+    $dbh->do("insert into metadata (mode,uid,gid,links,mtime,ctime,atime) values($mode,$uid,$gid,2,$timestamp,$timestamp,$timestamp)") 
 	or croak $dbh->errstr;
     $dbh->do("insert into path (inode,name,parent) values (1,'/',null)")
 	or croak $dbh->errstr;
