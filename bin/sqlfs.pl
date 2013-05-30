@@ -14,7 +14,8 @@ Options:
   --unmount                     unmount the indicated directory
   --foreground                  remain in foreground (false)
   --nothreads                   disable threads (false)
-  --debug=<1,2>                 enable debugging. Pass -d 2 to trace Fuse operations (verbose!!)
+  --debug                       enable Fuse debugging messages
+  --module=DBI::Filesystem::... Use a subclass of DBI::Filesystem
 
   --option=allow_other          allow other accounts to access filesystem (false)
   --option=default_permissions  enable permission checking by kernel (false)
@@ -56,6 +57,39 @@ non-option argument is interpreted as the mountpoint, not database
 name.
 
 =head1 MORE INFORMATION
+
+This is a front end to the DBI::Filesystem module, which creates a
+fully-functioning userspace filesystem on top of a relational
+database. Unlike other filesystem-to-DBM mappings, such as Fuse::DBI,
+this one creates and manages a specific schema designed to support
+filesystem operations. If you wish to mount a filesystem on an
+arbitrary DBM schema, you want Fuse::DBI, not this.
+
+Why would you use this? The main reason is that it allows you to use
+DBMs functionality such as accessibility over the network, database
+replication, failover, etc. In addition, the underlying
+DBI::Filesystem system can easily be extended to allow additional
+functionality such as arbitrary access control rules, searchable file
+and directory metadata, full-text indexing of file contents, etc.
+
+Most filesystem functionality is implemented, including hard and soft
+links, sparse files, ownership and access modes, UNIX permission
+checking, and random access to binary files. The following features
+are not implemented:
+
+ * statfs -- df on the filesystem will not provide any information
+             free space or other filesystem information.
+
+ * extended attributes -- Extended attributes are not supported.
+
+ * nanosecond times -- atime, mtime and ctime are accurate only to the
+             second.
+
+ * ioctl -- none are supported
+
+ * poll  -- polling on the filesystem to detect events that update files
+            will not work.
+
 
 =head2 Fuse Notes
 
@@ -100,7 +134,7 @@ use POSIX qw(SIGINT SIGTERM SIGHUP);
 use Getopt::Long qw(:config no_ignore_case bundling_override);
 use Pod::Usage;
 
-my (@FuseOptions,$UnMount,$Create,$Debug,$NoDaemon,$NoThreads,$Help,$Man);
+my (@FuseOptions,$Module,$UnMount,$Create,$Debug,$NoDaemon,$NoThreads,$Help,$Man);
 
 
 GetOptions(
@@ -111,14 +145,14 @@ GetOptions(
     'foreground|f' => \$NoDaemon,
     'nothreads|n'  => \$NoThreads,
     'unmount|u'    => \$UnMount,
-    'debug|d:i'    => \$Debug,
+    'module|m'     => \$Module,
+    'debug|d'      => \$Debug,
  ) or pod2usage(-verbose=>2);
 
  pod2usage(1)                          if $Help;
  pod2usage(-exitstatus=>0,-verbose=>2) if $Man;
 
 $NoThreads  ||= check_disable_threads();
-$Debug        = 1 if defined $Debug && $Debug==0;
 $Debug      ||= 0;
 
 if ($UnMount) {
@@ -141,7 +175,11 @@ my $options  = join(',',@FuseOptions);
 
 become_daemon() unless $NoDaemon;
 
-my $filesystem = DBI::Filesystem->new($dsn,$Create);
+$Module ||= 'DBI::Filesystem';
+eval "require $Module;1"        or die $@;
+$Module->isa('DBI::Filesystem') or die "$Module does not inherit from DBI::Filesystem. Abort!\n";
+
+my $filesystem = $Module->new($dsn,$Create);
 $filesystem->mount($mountpoint,{debug=>$Debug,threaded=>!$NoThreads});
 
 exit 0;

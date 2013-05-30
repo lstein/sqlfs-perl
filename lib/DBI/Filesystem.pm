@@ -64,6 +64,8 @@ sub mount {
     my $mtpt = shift or croak "Usage: mount(\$mountpoint)";
     my $opts = shift;
 
+    warn join ' ',%$opts;
+
     my $pkg  = __PACKAGE__;
 
     $Self = $self;  # because entrypoints cannot be passed as closures
@@ -91,7 +93,6 @@ sub mount {
 	       readlink    => "$pkg\:\:e_readlink",
 	       unlink      => "$pkg\:\:e_unlink",
 	       utime       => "$pkg\:\:e_utime",
-	       init        => "$pkg\:\:e_init",
 	       nullpath_ok => 1,
 	       debug       => 0,
 	       threaded    => 0,
@@ -728,6 +729,8 @@ sub check_perm {
     my $ctx = $self->get_context;
     my ($uid,$gid) = @{$ctx}{'uid','gid'};
 
+    return 0 if $uid==0; # root can do anything
+
     my $dbh      = $self->dbh;
 
     my $fff = 0xfff;
@@ -1113,7 +1116,7 @@ sub _get_groups {
 
 sub get_context {
     my $self = shift;
-    return $self->get_context if $self->mounted;
+    return fuse_get_context() if $self->mounted;
     my ($gid) = $( =~ /^(\d+)/;
     return {
 	uid   => $<,

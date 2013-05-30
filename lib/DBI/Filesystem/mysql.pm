@@ -50,7 +50,6 @@ sub _write_blocks {
     my ($length) = $dbh->selectrow_array("select length from metadata where inode=$inode");
     my $hwm      = $length;  # high water mark ;-)
 
-
     my $tuples = join ',',('(?,?,?)')x(keys %$blocks);
     eval {
 	$dbh->begin_work;
@@ -61,7 +60,7 @@ END
 	my @bind = map {($inode,$_,$blocks->{$_})} keys %$blocks;
 	$sth->execute(@bind);
 	for my $block (keys %$blocks) {
-	    my $a   = $block * $blksize + length($blocks->{$data});
+	    my $a   = $block * $blksize + length($blocks->{$block});
 	    $hwm    = $a if $a > $hwm;
 	}
 	$sth->finish;
