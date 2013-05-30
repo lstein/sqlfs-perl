@@ -62,6 +62,7 @@ my $Self;   # because entrypoints cannot be passed as closures
 sub mount {
     my $self = shift;
     my $mtpt = shift or croak "Usage: mount(\$mountpoint)";
+    my $opts = shift;
 
     my $pkg  = __PACKAGE__;
 
@@ -92,6 +93,7 @@ sub mount {
 	       nullpath_ok => 1,
 	       debug       => 0,
 	       threaded    => 1,
+	       %$opts,
 	);
 }
 
@@ -278,10 +280,10 @@ sub dsn { shift->{dsn} }
 sub dbh {
     my $self = shift;
     my $dsn  = $self->dsn;
-    return $self->{dbh} ||= DBI->connect($dsn,
-					 undef,undef,
-					 {RaiseError=>1,
-					  AutoCommit=>1}) or croak DBI->errstr;
+    return $self->{dbh} ||= eval {DBI->connect($dsn,
+					       undef,undef,
+					       {RaiseError=>1,
+						AutoCommit=>1})} || do {warn $@; croak $@;};
 }
 
 sub create_inode {

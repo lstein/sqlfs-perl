@@ -11,10 +11,10 @@ sub dbh {
      my $self = shift;
      my $dsn  = $self->dsn;
      return $self->{dbh} if $self->{dbh};
-     my $dbh = DBI->connect($dsn,
-			    undef,undef,
-			    {RaiseError=>1,
-			     AutoCommit=>1}) or croak DBI->errstr;
+     my $dbh = eval {DBI->connect($dsn,
+				  undef,undef,
+				  {RaiseError=>1,
+				   AutoCommit=>1})} or do {warn $@; croak $@};
      $dbh->do('PRAGMA synchronous = OFF') or die $dbh->errstr;
      return $self->{dbh} = $dbh;
 }
