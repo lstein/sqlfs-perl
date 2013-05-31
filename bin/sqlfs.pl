@@ -74,8 +74,8 @@ and directory metadata, full-text indexing of file contents, etc.
 
 Most filesystem functionality is implemented, including hard and soft
 links, sparse files, ownership and access modes, UNIX permission
-checking, and random access to binary files. The following features
-are not implemented:
+checking and random access to binary files. The following features are
+not implemented:
 
  * statfs -- df on the filesystem will not provide any information
              free space or other filesystem information.
@@ -90,6 +90,14 @@ are not implemented:
  * poll  -- polling on the filesystem to detect events that update files
             will not work.
 
+ * lock  -- locking on the local machine works. Protocol-level locking,
+            which would allow cooperative locks on different machines talking
+            to the same database server, is not implemented.
+
+In addition, although you can create device special files using the
+"mknod" command, you will not be able to use these files because the
+fuse filesystem always seems to be mounted "nodev" regardless of the
+mount options.
 
 =head2 Fuse Notes
 

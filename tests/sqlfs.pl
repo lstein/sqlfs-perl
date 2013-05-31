@@ -13,8 +13,8 @@ POSIX::sigaction(SIGINT,POSIX::SigAction->new(sub {warn "bye bye"; exec 'fusermo
     || die "Couldn't set SIGINT: $!";
 #$SIG{INT} = sub {warn "bye bye"; exec 'fusermount','-u',$mnt};
 
-my $fs = DBI::Filesystem->new($dsn,{create=>1});
+my $fs = DBI::Filesystem->new($dsn,{create=>0});
 #my $fs = DBI::Filesystem->new($dsn);
-$fs->mount($mnt,{mountopts=>'allow_other',debug=>1});
+$fs->mount($mnt,{mountopts=>'suid,noatime,allow_other,dev,suid',debug=>0});
 
 exit 0;
