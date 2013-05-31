@@ -1,0 +1,8 @@
+bin/sqlfs.pl
+Build.PL
+lib/DBI/Filesystem.pm
+lib/DBI/Filesystem/mysql.pm
+lib/DBI/Filesystem/Pg.pm
+lib/DBI/Filesystem/SQLite.pm
+MANIFEST			This list of files
+README.md

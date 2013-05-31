@@ -65,41 +65,59 @@ this one creates and manages a specific schema designed to support
 filesystem operations. If you wish to mount a filesystem on an
 arbitrary DBM schema, you want Fuse::DBI, not this.
 
+Most filesystem functionality is implemented, including hard and soft
+links, sparse files, ownership and access modes, UNIX permission
+checking and random access to binary files. Very large files (up to
+multiple gigabytes) are supported without performance degradation.
+
 Why would you use this? The main reason is that it allows you to use
 DBMs functionality such as accessibility over the network, database
 replication, failover, etc. In addition, the underlying
-DBI::Filesystem system can easily be extended to allow additional
-functionality such as arbitrary access control rules, searchable file
-and directory metadata, full-text indexing of file contents, etc.
+DBI::Filesystem module can be extended via subclassing to allow
+additional functionality such as arbitrary access control rules,
+searchable file and directory metadata, full-text indexing of file
+contents, etc.
 
-Most filesystem functionality is implemented, including hard and soft
-links, sparse files, ownership and access modes, UNIX permission
-checking and random access to binary files. The following features are
-not implemented:
+=head2 Unsupported Features
 
- * statfs -- df on the filesystem will not provide any information
-             free space or other filesystem information.
+The following features are not implemented:
+
+ * statfs -- df on the filesystem will not provide any useful information
+            on free space or other filesystem information.
 
  * extended attributes -- Extended attributes are not supported.
 
  * nanosecond times -- atime, mtime and ctime are accurate only to the
-             second.
+            second.
 
  * ioctl -- none are supported
 
- * poll  -- polling on the filesystem to detect events that update files
-            will not work.
+ * poll  -- polling on the filesystem to detect file update events will not work.
 
- * lock  -- locking on the local machine works. Protocol-level locking,
-            which would allow cooperative locks on different machines talking
-            to the same database server, is not implemented.
+ * lock  -- file handle locking among processes running on the local machine 
+            works, but protocol-level locking, which would allow cooperative 
+            locks on different machines talking to the same database server, 
+            is not implemented.
 
-In addition, although you can create device special files using the
-"mknod" command, you will not be able to use these files because the
-fuse filesystem always seems to be mounted "nodev" regardless of the
-mount options.
+You must be the superuser in order to create a file system with the
+suid and dev features enabled, and must invoke this commmand with
+the mount options "allow_other", "suid" and/or "dev":
 
-=head2 Fuse Notes
+   -o dev,suid,allow_other
+
+=head2 Supported Database Management Systems
+
+DBMSs differ in what subsets of the SQL language they support,
+supported datatypes, date/time handling, and support for large binary
+objects. DBI::Filesystem currently supports MySQL, PostgreSQL and
+SQLite. Other DBMSs can be supported by creating a subclass file
+named, e.g. DBI::Filesystem:Oracle, where the last part of the class
+name corresponds to the DBD driver name ("Oracle" in this
+example). See DBI::Filesystem::SQLite, DBI::Filesystem::mysql and
+DBI::Filesystem:Pg for an illustration of the methods that need to be
+defined/overridden.
+
+=head2 Fuse Installation Notes
 
 For best performance, you will need to run this filesystem using a
 version of Perl that supports IThreads. Otherwise it will fall back to
@@ -179,7 +197,7 @@ foreach (SIGTERM,SIGINT,SIGHUP) {
     POSIX::sigaction($_=>$action) or die "Couldn't set $_ handler: $!";
 }
 
-my $options  = join(',',@FuseOptions);
+my $mountopts  = join(',',@FuseOptions);
 
 become_daemon() unless $NoDaemon;
 
@@ -188,7 +206,7 @@ eval "require $Module;1"        or die $@;
 $Module->isa('DBI::Filesystem') or die "$Module does not inherit from DBI::Filesystem. Abort!\n";
 
 my $filesystem = $Module->new($dsn,{create=>$Create});
-$filesystem->mount($mountpoint,{debug=>$Debug,threaded=>!$NoThreads});
+$filesystem->mount($mountpoint,{debug=>$Debug,threaded=>!$NoThreads,mountopts=>$mountopts});
 
 exit 0;
 

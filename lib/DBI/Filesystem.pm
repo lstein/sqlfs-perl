@@ -6,18 +6,167 @@ DBI::Filesystem - Store a filesystem in a relational database
 
 =head1 SYNOPSIS
 
+ use DBI::Filesystem;
+
+ # Preliminaries. Create the mount point:
+ mkdir '/tmp/mount';
+
+ # Create the databas:
+ system "mysqladmin -uroot create test_filesystem"; 
+ system "mysql -uroot -e 'grant all privileges on test_filesystem.* to $ENV{USER}@localhost' mysql";
+
+ # (Usually you would do this in the shell.)
+ # (You will probably need to add the admin user's password)
+
+ # Create the filesystem object
+ $fs = DBI::Filesystem->new('dbi:mysql:test_filesystem',{create=>1});
+
+ # Mount it on the mount point.
+ # This call will block until the filesystem is mounted by another
+ # process by calling "fusermount -u /tmp/mount"
+ $fs->mount('/tmp/mount');
+
+ # Alternatively, manipulate the filesystem directly from within Perl.
+ # Any of these methods could raise a fatal error, so always wrap in
+ # an eval to catch those errors.
+ eval {
+   # directory creation
+   $fs->create_directory('/dir1');
+   $fs->create_directory('/dir1/subdir_1a');
+
+   # file creation
+   $fs->create_file('/dir1/subdir_1a/test.txt');
+
+   # file I/O
+   $fs->write('/dir1/subdir_1a/test.txt','This is my favorite file',0);
+   my $data = $fs->read('/dir1/subdir_1a/test.txt',100,0);
+
+   # reading contents of a directory
+   my @entries = $fs->getdir('/dir1');
+
+   # fstat file/directory
+   my @stat = $fs->stat('/dir1/subdir_1a/test.txt');
+
+   #chmod/chown file
+   $fs->chmod('/dir1/subdir_1a/test.txt',0600);
+   $fs->chown('/dir1/subdir_1a/test.txt',1001,1001); #uid,gid
+
+   # rename file/directory
+   $fs->rename('/dir1'=>'/dir2');
+
+   # create a symbolic link
+   $fs->create_symlink('/dir2' => '/dir1');
+
+   # create a hard link
+   $fs->create_hardlink('/dir2/subdir_1a/test.txt' => '/dir2/hardlink.txt');
+
+   # read symbolic link
+   my $target = $fs->read_symlink('/dir1/symlink.txt');
+
+   # unlink a file
+   $fs->unlink_file('/dir2/subdir_1a/test.txt');
+
+   # remove a directory
+   $fs->remove_directory('/dir2/subdir_1a');
+
+   # get the inode (integer) that corresponds to a file/directory
+   my $inode = $fs->path2inode('/dir2');
+
+   # get the path(s) that correspond to an inode
+   my @paths = $fs->inode2paths($inode);
+ };
+ if ($@) { warn "file operation failed with $@"; }
+ 
 =head1 DESCRIPTION
 
+This module can be used to create a fully-functioning "Fuse" userspace
+filesystem on top of a relational database. Unlike other
+filesystem-to-DBM mappings, such as Fuse::DBI, this one creates and
+manages a specific schema designed to support filesystem
+operations. If you wish to mount a filesystem on an arbitrary DBM
+schema, you probably want Fuse::DBI, not this.
+
+Most filesystem functionality is implemented, including hard and soft
+links, sparse files, ownership and access modes, UNIX permission
+checking and random access to binary files. Very large files (up to
+multiple gigabytes) are supported without performance degradation.
+
+Why would you use this? The main reason is that it allows you to use
+DBMs functionality such as accessibility over the network, database
+replication, failover, etc. In addition, the underlying
+DBI::Filesystem module can be extended via subclassing to allow
+additional functionality such as arbitrary access control rules,
+searchable file and directory metadata, full-text indexing of file
+contents, etc.
+
+Before mounting the DBMS, you must have created the database and
+assigned yourself sufficient privileges to read and write to it. You
+must also create an empty directory to serve as the mount point.
+
+A convenient front-end to this library is provided by B<sqlfs.pl>,
+which is installed along with this library.
+
+=head2 Unsupported Features
+
+The following features are not implemented:
+
+ * statfs -- df on the filesystem will not provide any useful information
+            on free space or other filesystem information.
+
+ * extended attributes -- Extended attributes are not supported.
+
+ * nanosecond times -- atime, mtime and ctime are accurate only to the
+            second.
+
+ * ioctl -- none are supported
+
+ * poll  -- polling on the filesystem to detect file update events will not work.
+
+ * lock  -- file handle locking among processes running on the local machine 
+            works, but protocol-level locking, which would allow cooperative 
+            locks on different machines talking to the same database server, 
+            is not implemented.
+
+You must be the superuser in order to create a file system with the
+suid and dev features enabled, and must invoke this commmand with
+the mount options "allow_other", "suid" and/or "dev":
+
+   -o dev,suid,allow_other
+
+=head2 Supported Database Management Systems
+
+DBMSs differ in what subsets of the SQL language they support,
+supported datatypes, date/time handling, and support for large binary
+objects. DBI::Filesystem currently supports MySQL, PostgreSQL and
+SQLite. Other DBMSs can be supported by creating a subclass file
+named, e.g. DBI::Filesystem:Oracle, where the last part of the class
+name corresponds to the DBD driver name ("Oracle" in this
+example). See DBI::Filesystem::SQLite, DBI::Filesystem::mysql and
+DBI::Filesystem:Pg for an illustration of the methods that need to be
+defined/overridden.
+
+=head2 Fuse Installation Notes
+
+For best performance, you will need to run this filesystem using a
+version of Perl that supports IThreads. Otherwise it will fall back to
+non-threaded mode, which will introduce occasional delays during
+directory listings and have notably slower performance when reading
+from more than one file simultaneously.
+
+If you are running Perl 5.14 or higher, you *MUST* use at least 0.15
+of the Perl Fuse module. At the time this was written, the version of
+Fuse 0.15 on CPAN was failing its regression tests on many
+platforms. I have found that the easiest way to get a fully
+operational Fuse module is to clone and compile a patched version of
+the source, following this recipe:
+
+ $ git clone git://github.com/isync/perl-fuse.git
+ $ cd perl-fuse
+ $ perl Makefile.PL
+ $ make test   (optional)
+ $ sudo make install
+
 =head1 METHODS
-
-=head1 AUTHOR
-
-Copyright 2013, Lincoln D. Stein <lincoln.stein@gmail.com>
-
-=head1 LICENSE
-
-This package is distributed under the terms of the Perl Artistic
-License 2.0. See http://www.perlfoundation.org/artistic_license_2_0.
 
 =cut
 
@@ -33,14 +182,33 @@ use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO EPER
              O_RDONLY O_WRONLY O_RDWR O_CREAT F_OK R_OK W_OK X_OK
              S_IXUSR S_IXGRP S_IXOTH);
 use Carp 'croak';
-use Symbol 'gensym';
-use IO::Handle;
+
+our $VERSION = '1.00';
 
 use constant MAX_PATH_LEN => 4096;  # characters
 use constant BLOCKSIZE    => 16384;  # bytes
 use constant FLUSHBLOCKS  => 256;    # flush after we've accumulated this many cached blocks
 
 my %Blockbuff :shared;
+
+
+=head2 $fs = DBI::Filesystem->new($dsn,{options...})
+
+Create the new DBI::Filesystem object. The mandatory first argument is
+a DBI data source, in the format "dbi:<driver>:<other_arguments>". The
+other arguments may include the database name, host, port, and
+security credentials. See the documentation for your DBMS for details.
+
+Non-mandatory options are contained in a hash reference with one or
+more of the following keys:
+
+ create              If true, then initialize the database schema. Many
+                     DBMSs require you to create the database first.
+
+ ignore_permissions  If true, then Unix permission checking is not
+                     performed when creating/reading/writing files.
+
+=cut
 
 # DBI::Filesystem->new($dsn,{create=>1,ignore_permissions=>1})
 sub new {
@@ -1178,5 +1346,17 @@ sub blocksize   { return 4096 }
 sub flushblocks { return   64 }
 
 1;
+
+
+=head1 AUTHOR
+
+Copyright 2013, Lincoln D. Stein <lincoln.stein@gmail.com>
+
+=head1 LICENSE
+
+This package is distributed under the terms of the Perl Artistic
+License 2.0. See http://www.perlfoundation.org/artistic_license_2_0.
+
+=cut
 
 __END__
