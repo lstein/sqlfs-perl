@@ -42,17 +42,32 @@ use constant FLUSHBLOCKS  => 256;    # flush after we've accumulated this many c
 
 my %Blockbuff :shared;
 
+# DBI::Filesystem->new($dsn,{create=>1,ignore_permissions=>1})
 sub new {
     my $class = shift;
-    my ($dsn,$create) = @_;
-    my ($dbd)         = $dsn =~ /dbi:([^:]+)/;
+    my ($dsn,$options) = @_;
+
+    my ($dbd)          = $dsn =~ /dbi:([^:]+)/;
     $dbd or croak "Could not figure out the DBI subclass to load from $dsn";
+
     my $subclass = __PACKAGE__.'::'.$dbd;
     eval "require $subclass;1" or croak $@  unless $subclass->can('new');
-    my $self  = bless {dsn          => $dsn},$subclass;
+
+    my $self  = bless {
+	dsn          => $dsn,
+	%$options
+    },$subclass;
+
     local $self->{dbh};  # to avoid cloning database handle into child threads
-    $self->_initialize_schema if $create;
+    $self->_initialize_schema if $options->{create};
     return $self;
+}
+
+sub ignore_permissions {
+    my $self = shift;
+    my $d    = $self->{ignore_permissions};
+    $self->{ignore_permissions} = shift if @_;
+    $d;
 }
 
 ############### filesystem handlers below #####################
@@ -66,13 +81,8 @@ sub mount {
 
     $fuse_opts ||= {};
 
-    if ($fuse_opts->{mountopts}) {
-	my %o = map {$_=>1} split ',',$fuse_opts->{mountopts};
-	%o    = (hard_remove=>1,%o);
-	$fuse_opts->{mountopts} = join ',',keys %o;
-    } else {
-	$fuse_opts->{mountopts} = 'hard_remove';
-    }
+    $fuse_opts->{mountopts} ||='hard_remove';
+    $fuse_opts->{mountopts}  .=',hard_remove' unless $fuse_opts->{mountopts} =~ /hard_remove/;
 
     my $pkg  = __PACKAGE__;
 
@@ -447,7 +457,7 @@ sub unlink_inode {
     eval {
 	$dbh->begin_work;
 	$dbh->do("delete from metadata where inode=$inode") or die $dbh->errstr;
-	$dbh->do("delete from data     where inode=$inode") or die $dbh->errstr;
+	$dbh->do("delete from extents  where inode=$inode") or die $dbh->errstr;
 	$dbh->commit;
     };
     if ($@) {
@@ -632,7 +642,7 @@ sub _read_direct {
     my $dbh = $self->dbh;
     my $sth = $dbh->prepare_cached(<<END);
 select block,contents 
-   from data where inode=? 
+   from extents where inode=? 
    and block between ? and ?
    order by block
 END
@@ -702,6 +712,9 @@ sub check_open_perm {
 sub check_path {
     my $self = shift;
     my ($dir,$inode,$uid,$gid) = @_;
+
+    return 1 if $self->ignore_permissions;
+
     my $groups   = $self->get_groups($uid,$gid);
 
     my $dbh      = $self->dbh;
@@ -733,6 +746,9 @@ END
 sub check_perm {
     my $self = shift;
     my ($inode,$access_mode) = @_;
+
+    return 1 if $self->ignore_permissions;
+
     my $ctx = $self->get_context;
     my ($uid,$gid) = @{$ctx}{'uid','gid'};
 
@@ -795,7 +811,7 @@ sub write {
 	my $current_length = length($blocks->{$block}||'');
 
 	if ($bytes < $blksize && !$current_length) {  # partial block replacement, and not currently cached
-	    my $sth = $dbh->prepare_cached('select contents,length(contents) from data where inode=? and block=?');
+	    my $sth = $dbh->prepare_cached('select contents,length(contents) from extents where inode=? and block=?');
 	    $sth->execute($inode,$block);
 	    ($blocks->{$block},$current_length) = $sth->fetchrow_array();
 	    $current_length                   ||= 0;
@@ -858,7 +874,7 @@ sub _write_blocks {
     eval {
 	$dbh->begin_work;
 	my $sth = $dbh->prepare_cached(<<END) or die $dbh->errstr;
-replace into data (inode,block,contents) values (?,?,?)
+replace into extents (inode,block,contents) values (?,?,?)
 END
 ;
 	for my $block (keys %$blocks) {
@@ -902,8 +918,8 @@ sub truncate {
     my $trunc      = $length % $self->blocksize;
     eval {
 	$dbh->begin_work;
-	$dbh->do("delete from data where inode=$inode and block>$last_block");
-	$dbh->do("update data set contents=substr(contents,1,$trunc) where inode=$inode and block=$last_block");
+	$dbh->do("delete from extents where inode=$inode and block>$last_block");
+	$dbh->do("update      extents set contents=substr(contents,1,$trunc) where inode=$inode and block=$last_block");
 	$dbh->do("update metadata set length=$length where inode=$inode");
 	$self->touch($inode,'mtime');
 	$dbh->commit;
@@ -1081,11 +1097,11 @@ sub _initialize_schema {
     my $dbh  = $self->dbh;
     $dbh->do('drop table if exists metadata') or croak $dbh->errstr;
     $dbh->do('drop table if exists path')     or croak $dbh->errstr;
-    $dbh->do('drop table if exists data')     or croak $dbh->errstr;
+    $dbh->do('drop table if exists extents')  or croak $dbh->errstr;
     
     $dbh->do($_) foreach split ';',$self->_metadata_table_def;
     $dbh->do($_) foreach split ';',$self->_path_table_def;
-    $dbh->do($_) foreach split ';',$self->_data_table_def;
+    $dbh->do($_) foreach split ';',$self->_extents_table_def;
 
     # create the root node
     # should update this to use fuse_get_context to get proper uid, gid and masked permissions
@@ -1139,11 +1155,10 @@ sub _fstat_sql {
     my $inode = shift;
     my $times = join ',',map{$self->_get_unix_timestamp_sql($_)} 'ctime','mtime','atime';
     return <<END;
-select n.inode,mode,uid,gid,links,
+select inode,mode,uid,gid,links,
        $times,length
- from metadata as n
- left join data as c on (n.inode=c.inode)
- where n.inode=$inode
+ from metadata
+ where inode=$inode
 END
 }
 

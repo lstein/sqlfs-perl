@@ -47,14 +47,14 @@ create table path (
 END
 }
 
-sub _data_table_def {
+sub _extents_table_def {
     return <<END;
-create table data (
+create table extents (
     inode        int(10),
     block        int(10),
     contents     blob
 );
-    create unique index iblock on data (inode,block)
+    create unique index iblock on extents (inode,block)
 END
 }
 

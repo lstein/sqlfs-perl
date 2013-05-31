@@ -45,14 +45,14 @@ create table path (
 END
 }
 
-sub _data_table_def {
+sub _extents_table_def {
     return <<END;
 create table data (
     inode        integer,
     block        integer,
     contents     bytea
 );
-    create unique index iblock on data (inode,block)
+    create unique index iblock on extents (inode,block)
 END
 }
 
@@ -81,13 +81,13 @@ sub _write_blocks {
     eval {
 	$dbh->begin_work;
 	my $insert = $dbh->prepare_cached(<<END) or die $dbh->errstr;
-insert into data (inode,block,contents) values (?,?,?)
+insert into extents (inode,block,contents) values (?,?,?)
 END
 ;
 	$insert->bind_param(3,undef,{pg_type=>PG_BYTEA});
 
 	my $update = $dbh->prepare_cached(<<END) or die $dbh->errstr;
-update data set contents=? where inode=? and block=?
+update extents set contents=? where inode=? and block=?
 END
 ;
 	$update->bind_param(1,undef,{pg_type=>PG_BYTEA});

@@ -30,9 +30,9 @@ create table path (
 END
 }
 
-sub _data_table_def {
+sub _extents_table_def {
     return <<END;
-create table data (
+create table extents (
     inode        int(10),
     block        int(10),
     contents     blob,
@@ -54,7 +54,7 @@ sub _write_blocks {
     eval {
 	$dbh->begin_work;
 	my $sth = $dbh->prepare_cached(<<END) or die $dbh->errstr;
-replace into data (inode,block,contents) values $tuples
+replace into extents (inode,block,contents) values $tuples
 END
 ;
 	my @bind = map {($inode,$_,$blocks->{$_})} keys %$blocks;

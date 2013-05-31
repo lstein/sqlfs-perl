@@ -179,7 +179,7 @@ $Module ||= 'DBI::Filesystem';
 eval "require $Module;1"        or die $@;
 $Module->isa('DBI::Filesystem') or die "$Module does not inherit from DBI::Filesystem. Abort!\n";
 
-my $filesystem = $Module->new($dsn,$Create);
+my $filesystem = $Module->new($dsn,{create=>$Create});
 $filesystem->mount($mountpoint,{debug=>$Debug,threaded=>!$NoThreads});
 
 exit 0;
