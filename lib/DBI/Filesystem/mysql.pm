@@ -9,6 +9,7 @@ create table metadata (
     mode         int(10)      not null,
     uid          int(10)      not null,
     gid          int(10)      not null,
+    rdev         int(10)      default 0,
     links        int(10)      default 0,
     inuse        int(10)      default 0,
     length       bigint       default 0,

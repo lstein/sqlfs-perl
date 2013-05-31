@@ -155,6 +155,8 @@ sub e_fgetattr {
 sub e_mkdir {
     my $path = fixup(shift);
     my $mode = shift;
+
+    $mode   |= 0040000;
     my $ctx            = $Self->get_context();
     my $umask          = $ctx->{umask};
     eval {$Self->create_directory($path,$mode&(~$umask))};
@@ -167,7 +169,7 @@ sub e_mknod {
     my ($mode,$device) = @_;
     my $ctx            = $Self->get_context;
     my $umask          = $ctx->{umask};
-    eval {$Self->create_file($path,$mode&(~$umask))};
+    eval {$Self->create_file($path,$mode&(~$umask),$device)};
     return $Self->errno($@) if $@;
     return 0;
 }
@@ -315,19 +317,23 @@ sub dbh {
 
 sub create_inode {
     my $self        = shift;
-    my ($type,$mode,$uid,$gid) = @_;
+    my ($type,$mode,$rdev,$uid,$gid) = @_;
 
-    $mode  = 0777 unless defined $mode;
-    $mode |=  $type eq 'f' ? 0100000
-             :$type eq 'd' ? 0040000
-             :$type eq 'l' ? 0120000
-                           : 0100000;  # default
-    $uid ||= 0;
-    $gid ||= 0;
+    unless (defined $mode) {
+	$mode  = 0777 ;
+	$mode |=  $type eq 'f' ? 0100000
+	         :$type eq 'd' ? 0040000
+	         :$type eq 'l' ? 0120000
+	         :0100000;  # default
+    }
+
+    $uid  ||= 0;
+    $gid  ||= 0;
+    $rdev ||= 0;
 
     my $dbh = $self->dbh;
     my $sth = $dbh->prepare_cached($self->_create_inode_sql);
-    $sth->execute($mode,$uid,$gid,$type eq 'd' ? 1 : 0) or die $sth->errstr;
+    $sth->execute($mode,$uid,$gid,$rdev,$type eq 'd' ? 1 : 0) or die $sth->errstr;
     $sth->finish;
     return $self->last_inserted_inode($dbh);
 }
@@ -350,7 +356,7 @@ sub create_hardlink {
 sub create_symlink {
     my $self = shift;
     my ($oldpath,$newpath) = @_;
-    my $newnode= $self->create_inode_and_path($newpath,'l',0777);
+    my $newnode= $self->create_inode_and_path($newpath,'l',0120777);
     $self->write($newpath,$oldpath);
 }
 
@@ -383,7 +389,7 @@ sub create_path {
 
 sub create_inode_and_path {
     my $self = shift;
-    my ($path,$type,$mode) = @_;
+    my ($path,$type,$mode,$rdev) = @_;
     my $dbh    = $self->dbh;
     my $inode;
 
@@ -394,7 +400,7 @@ sub create_inode_and_path {
 
     eval {
 	$dbh->begin_work;
-	$inode  = $self->create_inode($type,$mode,@{$ctx}{'uid','gid'});
+	$inode  = $self->create_inode($type,$mode,$rdev,@{$ctx}{'uid','gid'});
 	$self->create_path($inode,$path);
 	$dbh->commit;
     };
@@ -407,8 +413,8 @@ sub create_inode_and_path {
 
 sub create_file { 
     my $self = shift;
-    my ($path,$mode,$uid,$gid) = @_;
-    $self->create_inode_and_path($path,'f',$mode);
+    my ($path,$mode,$rdev) = @_;
+    $self->create_inode_and_path($path,'f',$mode,$rdev);
 }
 
 sub create_directory {
@@ -533,7 +539,7 @@ sub fstat {
     my ($path,$inode) = @_;
     $inode ||= $self->path2inode;
     my $dbh          = $self->dbh;
-    my ($ino,$mode,$uid,$gid,$nlinks,$ctime,$mtime,$atime,$size) =
+    my ($ino,$mode,$uid,$gid,$rdev,$nlinks,$ctime,$mtime,$atime,$size) =
 	$dbh->selectrow_array($self->_fstat_sql($inode));
     $ino or die $dbh->errstr;
 
@@ -550,7 +556,7 @@ sub fstat {
     my $dev     = 0;
     my $blocks  = 1;
     my $blksize = $self->blocksize;
-    return ($dev,$ino,$mode,$nlinks,$uid,$gid,0,$size,$atime,$mtime,$ctime,$blksize,$blocks);
+    return ($dev,$ino,$mode,$nlinks,$uid,$gid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks);
 }
 
 sub stat {
@@ -1155,7 +1161,7 @@ sub _fstat_sql {
     my $inode = shift;
     my $times = join ',',map{$self->_get_unix_timestamp_sql($_)} 'ctime','mtime','atime';
     return <<END;
-select inode,mode,uid,gid,links,
+select inode,mode,uid,gid,rdev,links,
        $times,length
  from metadata
  where inode=$inode
@@ -1165,7 +1171,7 @@ END
 sub _create_inode_sql {
     my $self = shift;
     my $now = $self->_now_sql;
-    return "insert into metadata (mode,uid,gid,links,mtime,ctime,atime) values(?,?,?,?,$now,$now,$now)";
+    return "insert into metadata (mode,uid,gid,rdev,links,mtime,ctime,atime) values(?,?,?,?,?,$now,$now,$now)";
 }
 
 sub blocksize   { return 4096 }

@@ -15,6 +15,6 @@ POSIX::sigaction(SIGINT,POSIX::SigAction->new(sub {warn "bye bye"; exec 'fusermo
 
 my $fs = DBI::Filesystem->new($dsn,{create=>1});
 #my $fs = DBI::Filesystem->new($dsn);
-$fs->mount($mnt);
+$fs->mount($mnt,{mountopts=>'allow_other',debug=>1});
 
 exit 0;

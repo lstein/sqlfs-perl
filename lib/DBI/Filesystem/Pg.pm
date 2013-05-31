@@ -24,6 +24,7 @@ create table metadata (
     mode         integer      not null,
     uid          integer      not null,
     gid          integer      not null,
+    rdev         integer      default 0,
     links        integer      default 0,
     inuse        integer      default 0,
     length       bigint       default 0,
