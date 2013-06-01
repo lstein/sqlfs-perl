@@ -278,10 +278,13 @@ are presented as a comma-separated list as shown here:
 Common mount options include:
 
 Fuse specific
- nonempty    Allow mounting over non-empty directories if true [false]
- allow_other Allow other users to access the mounted filesystem [false]
- fsname      Set the filesystem source name shown in df and /etc/mtab
- auto_cache  Enable automatic flushing of data cache on open [false]
+ nonempty      Allow mounting over non-empty directories if true [false]
+ allow_other   Allow other users to access the mounted filesystem [false]
+ fsname        Set the filesystem source name shown in df and /etc/mtab
+ auto_cache    Enable automatic flushing of data cache on open [false]
+ hard_remove   Allow true unlinking of open files [true]
+ nohard_remove Activate alternate semantics for unlinking open files
+                (see below)
 
 General
  ro          Read-only filesystem
@@ -298,7 +301,18 @@ Some options require special privileges. In particular allow_other
 must be enabled in /etc/fuse.conf, and the dev and suid options can
 only be used by the root user.
 
-Do not 
+The "hard_remove" mount option is passed by default. This option
+allows files to be unlinked in one process while another process holds
+an open filehandle on them. The contents of the file will not actually
+be deleted until the last open filehandle is closed. The downside of
+this is that certain functions will fail when called on filehandles
+connected to unlinked files, including stat(), chmod(), and
+chown(). 
+
+Fuse offers an alternative semantic, in which unlinked open files are
+renamed to a hidden file with a name like ".fuse_hiddenXXXXXXX'. The
+hidden file is removed when the last filehandle is closed. To activate
+this semantic, pass "nohard_remove".
 
 =cut
 
@@ -309,8 +323,10 @@ sub mount {
 
     $fuse_opts ||= {};
 
-    $fuse_opts->{mountopts} ||='hard_remove';
-    $fuse_opts->{mountopts}  .=',hard_remove' unless $fuse_opts->{mountopts} =~ /hard_remove/;
+    my %mt_opts = map {$_=>1} split ',',$fuse_opts->{mountopts};
+    $mt_opts{hard_remove}++ unless $mt_opts{nohard_remove};
+    delete $mt_opts{nohard_remove};
+    $fuse_opts->{mountopts} = join ',',keys %mt_opts;
 
     my $pkg  = __PACKAGE__;
 
