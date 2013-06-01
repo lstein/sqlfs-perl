@@ -10,7 +10,8 @@ sqlfs.pl - Mount Fuse filesystem on a SQL database
 
 Options:
 
-  --create                      initialize an empty filesystem
+  --initialize                  initialize an empty filesystem
+  --quiet                       don't ask for confirmation of initialization
   --unmount                     unmount the indicated directory
   --foreground                  remain in foreground (false)
   --nothreads                   disable threads (false)
@@ -55,6 +56,10 @@ string, e.g.:
 If you request unmounting (using --unmount or -u), the first
 non-option argument is interpreted as the mountpoint, not database
 name.
+
+After initial checks, this command will go into the background. To
+keep it in the foreground, pass the --foreground option. Interrupting
+the foreground process will (try to) unmount the filesystem.
 
 =head1 MORE INFORMATION
 
@@ -132,7 +137,7 @@ platforms. I have found that the easiest way to get a fully
 operational Fuse module is to clone and compile a patched version of
 the source, following this recipe:
 
- $ git clone git://github.com/isync/perl-fuse.git
+ $ git clone git://github.com/dpavlin/perl-fuse.git
  $ cd perl-fuse
  $ perl Makefile.PL
  $ make test   (optional)
@@ -160,19 +165,20 @@ use POSIX qw(SIGINT SIGTERM SIGHUP);
 use Getopt::Long qw(:config no_ignore_case bundling_override);
 use Pod::Usage;
 
-my (@FuseOptions,$Module,$UnMount,$Create,$Debug,$NoDaemon,$NoThreads,$Help,$Man);
-
+my (@FuseOptions,$Module,$UnMount,$Initialize,$Debug,$Quiet,
+    $NoDaemon,$NoThreads,$Help,$Man);
 
 GetOptions(
     'help|h|?'     => \$Help,
     'man|m'        => \$Man,
-    'create|c'     => \$Create,
+    'initialize|i' => \$Initialize,
     'option|o:s'   => \@FuseOptions,
     'foreground|f' => \$NoDaemon,
     'nothreads|n'  => \$NoThreads,
     'unmount|u'    => \$UnMount,
     'module|m'     => \$Module,
     'debug|d'      => \$Debug,
+    'quiet|q'      => \$Quiet,
  ) or pod2usage(-verbose=>2);
 
  pod2usage(1)                          if $Help;
@@ -184,6 +190,11 @@ $Debug      ||= 0;
 if ($UnMount) {
     my $mountpoint = shift;
     exec 'fusermount','-u',$mountpoint;
+}
+if ($Initialize && !$Quiet && -t STDIN) {
+    print STDERR "WARNING: any existing data will be overwritten. Proceed? [y/N] ";
+    my $result = <STDIN>;
+    die "Aborted\n" unless $result =~ /^[yY]/;
 }
 
 my $dsn        = shift or pod2usage(1);
@@ -199,13 +210,14 @@ foreach (SIGTERM,SIGINT,SIGHUP) {
 
 my $mountopts  = join(',',@FuseOptions);
 
-become_daemon() unless $NoDaemon;
-
 $Module ||= 'DBI::Filesystem';
 eval "require $Module;1"        or die $@;
 $Module->isa('DBI::Filesystem') or die "$Module does not inherit from DBI::Filesystem. Abort!\n";
+my $filesystem = $Module->new($dsn,{initialize=>$Initialize});
 
-my $filesystem = $Module->new($dsn,{create=>$Create});
+# become daemon after loading the module, to avoid paths getting confused
+become_daemon() unless $NoDaemon;
+
 $filesystem->mount($mountpoint,{debug=>$Debug,threaded=>!$NoThreads,mountopts=>$mountopts});
 
 exit 0;
@@ -226,7 +238,8 @@ sub check_disable_threads {
 
 sub become_daemon {
     fork() && exit 0;
-    chdir ('/');
+    # this actually messes with 
+    #  chdir ('/');  
     setsid();
     open STDIN,"</dev/null";
     fork() && exit 0;

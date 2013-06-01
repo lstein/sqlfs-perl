@@ -19,7 +19,7 @@ DBI::Filesystem - Store a filesystem in a relational database
  # (You will probably need to add the admin user's password)
 
  # Create the filesystem object
- $fs = DBI::Filesystem->new('dbi:mysql:test_filesystem',{create=>1});
+ $fs = DBI::Filesystem->new('dbi:mysql:test_filesystem',{initialize=>1});
 
  # Mount it on the mount point.
  # This call will block until the filesystem is mounted by another
@@ -160,7 +160,7 @@ platforms. I have found that the easiest way to get a fully
 operational Fuse module is to clone and compile a patched version of
 the source, following this recipe:
 
- $ git clone git://github.com/isync/perl-fuse.git
+ $ git clone git://github.com/dpavlin/perl-fuse.git
  $ cd perl-fuse
  $ perl Makefile.PL
  $ make test   (optional)
@@ -202,11 +202,14 @@ security credentials. See the documentation for your DBMS for details.
 Non-mandatory options are contained in a hash reference with one or
 more of the following keys:
 
- create              If true, then initialize the database schema. Many
+ initialize          If true, then initialize the database schema. Many
                      DBMSs require you to create the database first.
 
  ignore_permissions  If true, then Unix permission checking is not
                      performed when creating/reading/writing files.
+
+WARNING: Initializing the schema quietly destroys anything that might
+have been there before!
 
 =cut
 
@@ -226,10 +229,17 @@ sub new {
 	%$options
     },$subclass;
 
-    local $self->{dbh};  # to avoid cloning database handle into child threads
-    $self->_initialize_schema if $options->{create};
+    $self->initialize_schema if $options->{initialize};
     return $self;
 }
+
+=head2 $boolean = $fs->ignore_permissions([$boolean]);
+
+Get/set the ignore_permissions flag. If ignore_permissions is true,
+then all permission checks on file and directory access modes are
+disabled, allowing you to create files owned by root, etc.
+
+=cut
 
 sub ignore_permissions {
     my $self = shift;
@@ -241,6 +251,56 @@ sub ignore_permissions {
 ############### filesystem handlers below #####################
 
 my $Self;   # because entrypoints cannot be passed as closures
+
+=head2 $fh->mount($mountpoint, [\%fuseopts])
+
+This method will mount the filesystem on the indicated mountpoint
+using Fuse and block until the filesystem is unmounted using the
+"fusermount -u" command or equivalent. The mountpoint must be an empty
+directory unless the "nonempty" mount option is passed.
+
+You may pass in a hashref of options to pass to the Fuse
+module. Recognized options and their defaults are:
+
+ debug        Turn on verbose debugging of Fuse operations [false]
+ threaded     Turn on threaded operations [true]
+ nullpath_ok  Allow filehandles on open files to be used even after file
+               is unlinked [true]
+ mountopts    Comma-separated list of mount options
+
+Mount options to be passed to Fuse are described at
+http://manpages.ubuntu.com/manpages/precise/man8/mount.fuse.8.html. In
+addition, you may pass the usual mount options such as "ro", etc. They
+are presented as a comma-separated list as shown here:
+
+ $fs->mount('/tmp/foo',{debug=>1,mountopts=>'ro,nonempty'})
+
+Common mount options include:
+
+Fuse specific
+ nonempty    Allow mounting over non-empty directories if true [false]
+ allow_other Allow other users to access the mounted filesystem [false]
+ fsname      Set the filesystem source name shown in df and /etc/mtab
+ auto_cache  Enable automatic flushing of data cache on open [false]
+
+General
+ ro          Read-only filesystem
+ dev         Allow device-special files
+ nodev       Do not allow device-special files
+ suid        Allow suid files
+ nosuid      Do not allow suid files
+ exec        Allow executable files
+ noexec      Do not allow executable files
+ atime       Update file/directory access times
+ noatime     Do not update file/directory access times
+
+Some options require special privileges. In particular allow_other
+must be enabled in /etc/fuse.conf, and the dev and suid options can
+only be used by the root user.
+
+Do not 
+
+=cut
 
 sub mount {
     my $self = shift;
@@ -255,6 +315,8 @@ sub mount {
     my $pkg  = __PACKAGE__;
 
     $Self = $self;  # because entrypoints cannot be passed as closures
+    $self->check_schema 
+	or croak "This database does not appear to contain a valid schema. Do you need to initialize it?\n";
     $self->mounted(1);
     Fuse::main(mountpoint  => $mtpt,
 	       getdir      => "$pkg\:\:e_getdir",
@@ -1162,6 +1224,7 @@ sub _getdir {
 sub errno {
     my $self = shift;
     my $message = shift;
+    warn $message if $message =~ /^(dbd|dbi)/i;
     return -ENOENT()    if $@ =~ /not found/;
     return -EISDIR()    if $@ =~ /is a directory/;
     return -ENOTDIR()   if $@ =~ /not a directory/;
@@ -1266,8 +1329,9 @@ END
 ;
 }
 
-sub _initialize_schema {
+sub initialize_schema {
     my $self = shift;
+    local $self->{dbh};  # to avoid cloning database handle into child threads
     my $dbh  = $self->dbh;
     $dbh->do('drop table if exists metadata') or croak $dbh->errstr;
     $dbh->do('drop table if exists path')     or croak $dbh->errstr;
@@ -1289,6 +1353,17 @@ sub _initialize_schema {
 	or croak $dbh->errstr;
     $dbh->do("insert into path (inode,name,parent) values (1,'/',null)")
 	or croak $dbh->errstr;
+}
+
+sub check_schema {
+    my $self     = shift;
+    local $self->{dbh};  # to avoid cloning database handle into child threads
+    my ($result) = eval {
+	$self->dbh->selectrow_array(<<END);
+select 1 from metadata as m,path as p left join extents as e on e.inode=p.inode where m.inode=1 and p.parent=1
+END
+    };
+    return !$@;
 }
 
 sub get_groups {
