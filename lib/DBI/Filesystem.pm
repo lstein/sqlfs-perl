@@ -257,7 +257,7 @@ sub ignore_permissions {
 
 our $Self;   # because entrypoints cannot be passed as closures
 
-=head2 $fh->mount($mountpoint, [\%fuseopts])
+=head2 $fs->mount($mountpoint, [\%fuseopts])
 
 This method will mount the filesystem on the indicated mountpoint
 using Fuse and block until the filesystem is unmounted using the
@@ -311,13 +311,12 @@ allows files to be unlinked in one process while another process holds
 an open filehandle on them. The contents of the file will not actually
 be deleted until the last open filehandle is closed. The downside of
 this is that certain functions will fail when called on filehandles
-connected to unlinked files, including stat(), chmod(), and
-chown(). 
-
-Fuse offers an alternative semantic, in which unlinked open files are
-renamed to a hidden file with a name like ".fuse_hiddenXXXXXXX'. The
-hidden file is removed when the last filehandle is closed. To activate
-this semantic, pass "nohard_remove".
+connected to unlinked files, including fstat(), ftruncate(), chmod(),
+and chown(). If this is an issue, then pass option
+"nohard_remove". This will activate Fuse's alternative semantic in
+which unlinked open files are renamed to a hidden file with a name
+like ".fuse_hiddenXXXXXXX'. The hidden file is removed when the last
+filehandle is closed.
 
 =cut
 
@@ -404,12 +403,35 @@ END
     return @args;
 }
 
+=head2 $boolean = $fs->mounted([$boolean])
+
+This method returns true if the filesystem is currently
+mounted. Subclasses can change this value by passing the new value as
+the argument.
+
+=back
+
 sub mounted {
     my $self = shift;
     my $d = $self->{mounted};
     $self->{mounted} = shift if @_;
     return $d;
 }
+
+=head2 $fixed_path = fixup($path)
+
+This is an ordinary function (not a method) that removes the initial
+slash from paths passed to this module from Fuse. The root directory is unchanged:
+
+ Before      After fixup()
+ ------      -------------
+ /foo        foo
+ /foo/bar    foo/bar
+ /          /
+
+To call this method from subclasses, invoke it as DBI::Filesystem::fixup().
+
+=back
 
 sub fixup {
     my $path = shift;
