@@ -221,8 +221,13 @@ sub new {
     my ($dbd)          = $dsn =~ /dbi:([^:]+)/;
     $dbd or croak "Could not figure out the DBI subclass to load from $dsn";
 
+    # load the appropriate DBD subclass and fix up its @ISA so that we become
+    # the parent class
+    my $c        = ref $class||$class;
     my $subclass = __PACKAGE__.'::'.$dbd;
     eval "require $subclass;1" or croak $@  unless $subclass->can('new');
+    eval "unshift \@$subclass\:\:ISA,'$c'   unless \$subclass->isa('$c')";
+    die $@ if $@;
 
     my $self  = bless {
 	dsn          => $dsn,
@@ -250,7 +255,7 @@ sub ignore_permissions {
 
 ############### filesystem handlers below #####################
 
-my $Self;   # because entrypoints cannot be passed as closures
+our $Self;   # because entrypoints cannot be passed as closures
 
 =head2 $fh->mount($mountpoint, [\%fuseopts])
 
@@ -380,7 +385,6 @@ sub _subclass_implemented_calls{
                 init destroy ftruncate lock utimens
                 bmap ioctl poll));
     my @implemented = grep {$self->can($_)} @u;
-    warn "$self->implements @implemented";
 
     my $pkg  = __PACKAGE__;
     foreach my $method (@implemented) {
@@ -388,16 +392,15 @@ sub _subclass_implemented_calls{
 	eval <<END;
 sub $hook {
     my \$path   = fixup(shift) if \@_;
-    my \@result = eval {\$Self->$method(\$path,\@_)};
+    my \@result = eval {\$${pkg}\:\:Self->$method(\$path,\@_)};
     return \$Self->errno(\$@) if \$@;
-    return \@result;
+    return wantarray ? \@result:\$result[0];
 }
 END
     ;
 	warn $@ if $@;
 	push @args,($method => $hook);
     }
-    warn join "\n",@args;
     return @args;
 }
 
