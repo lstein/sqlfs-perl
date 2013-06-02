@@ -176,7 +176,7 @@ GetOptions(
     'foreground|f' => \$NoDaemon,
     'nothreads|n'  => \$NoThreads,
     'unmount|u'    => \$UnMount,
-    'module|m'     => \$Module,
+    'module|m:s'   => \$Module,
     'debug|d'      => \$Debug,
     'quiet|q'      => \$Quiet,
  ) or pod2usage(-verbose=>2);

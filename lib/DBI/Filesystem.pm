@@ -334,33 +334,71 @@ sub mount {
     $self->check_schema 
 	or croak "This database does not appear to contain a valid schema. Do you need to initialize it?\n";
     $self->mounted(1);
-    Fuse::main(mountpoint  => $mtpt,
-	       getdir      => "$pkg\:\:e_getdir",
-	       getattr     => "$pkg\:\:e_getattr",
-	       fgetattr    => "$pkg\:\:e_fgetattr",
-	       open        => "$pkg\:\:e_open",
-	       release     => "$pkg\:\:e_release",
-	       read        => "$pkg\:\:e_read",
-	       write       => "$pkg\:\:e_write",
-	       truncate    => "$pkg\:\:e_truncate",
-	       create      => "$pkg\:\:e_create",
-	       mknod       => "$pkg\:\:e_mknod",
-	       mkdir       => "$pkg\:\:e_mkdir",
-	       rmdir       => "$pkg\:\:e_rmdir",
-	       link        => "$pkg\:\:e_link",
-	       rename      => "$pkg\:\:e_rename",
-	       access      => "$pkg\:\:e_access",
-	       chmod       => "$pkg\:\:e_chmod",
-	       chown       => "$pkg\:\:e_chown",
-	       symlink     => "$pkg\:\:e_symlink",
-	       readlink    => "$pkg\:\:e_readlink",
-	       unlink      => "$pkg\:\:e_unlink",
-	       utime       => "$pkg\:\:e_utime",
-	       nullpath_ok => 1,
-	       debug       => 0,
-	       threaded    => 1,
-	       %$fuse_opts,
+    my @args = (
+	mountpoint  => $mtpt,
+	getdir      => "$pkg\:\:e_getdir",
+	getattr     => "$pkg\:\:e_getattr",
+	fgetattr    => "$pkg\:\:e_fgetattr",
+	open        => "$pkg\:\:e_open",
+	release     => "$pkg\:\:e_release",
+	flush       => "$pkg\:\:e_flush",
+	read        => "$pkg\:\:e_read",
+	write       => "$pkg\:\:e_write",
+	truncate    => "$pkg\:\:e_truncate",
+	create      => "$pkg\:\:e_create",
+	mknod       => "$pkg\:\:e_mknod",
+	mkdir       => "$pkg\:\:e_mkdir",
+	rmdir       => "$pkg\:\:e_rmdir",
+	link        => "$pkg\:\:e_link",
+	rename      => "$pkg\:\:e_rename",
+	access      => "$pkg\:\:e_access",
+	chmod       => "$pkg\:\:e_chmod",
+	chown       => "$pkg\:\:e_chown",
+	symlink     => "$pkg\:\:e_symlink",
+	readlink    => "$pkg\:\:e_readlink",
+	unlink      => "$pkg\:\:e_unlink",
+	utime       => "$pkg\:\:e_utime",
+	nullpath_ok => 1,
+	debug       => 0,
+	threaded    => 1,
+	%$fuse_opts,
 	);
+    push @args,$self->_subclass_implemented_calls();
+    Fuse::main(@args);
+}
+
+# this method detects when one of the currently unimplemented
+# Fuse methods is defined in a subclass, and creates the appropriate
+# Fuse stub to call it
+sub _subclass_implemented_calls{
+    my $self = shift;
+    my @args;
+
+    my @u = (qw(statfs fsync 
+                setxattr getxattr listxattr removexattr
+                opendir readdir releasedir fsyncdir
+                init destroy ftruncate lock utimens
+                bmap ioctl poll));
+    my @implemented = grep {$self->can($_)} @u;
+    warn "$self->implements @implemented";
+
+    my $pkg  = __PACKAGE__;
+    foreach my $method (@implemented) {
+	my $hook = "$pkg\:\:e_$method";
+	eval <<END;
+sub $hook {
+    my \$path   = fixup(shift) if \@_;
+    my \@result = eval {\$Self->$method(\$path,\@_)};
+    return \$Self->errno(\$@) if \$@;
+    return \@result;
+}
+END
+    ;
+	warn $@ if $@;
+	push @args,($method => $hook);
+    }
+    warn join "\n",@args;
+    return @args;
 }
 
 sub mounted {
@@ -446,6 +484,13 @@ sub e_open {
 sub e_release {
     my ($path,$flags,$fh) = @_;
     eval {$Self->release($fh)};
+    return $Self->errno($@) if $@;
+    return 0;
+}
+
+sub e_flush {
+    my ($path,$fh) = @_;
+    eval {$Self->flush($path,$fh)};
     return $Self->errno($@) if $@;
     return 0;
 }
