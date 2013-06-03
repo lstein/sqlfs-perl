@@ -409,7 +409,7 @@ This method returns true if the filesystem is currently
 mounted. Subclasses can change this value by passing the new value as
 the argument.
 
-=back
+=cut
 
 sub mounted {
     my $self = shift;
@@ -418,27 +418,54 @@ sub mounted {
     return $d;
 }
 
-=head2 $fixed_path = fixup($path)
+=head2 Fuse hook functions
 
-This is an ordinary function (not a method) that removes the initial
-slash from paths passed to this module from Fuse. The root directory is unchanged:
+This module defines a series of short hook functions that form the
+glue between Fuse's function-oriented callback hooks and this module's
+object-oriented methods. A typical hook function looks like this:
 
- Before      After fixup()
- ------      -------------
- /foo        foo
- /foo/bar    foo/bar
- /          /
+ sub e_getdir {
+    my $path = fixup(shift);
+    my @entries = eval {$Self->getdir($path)};
+    return $Self->errno($@) if $@;
+    return (@entries,0);
+ }
 
-To call this method from subclasses, invoke it as DBI::Filesystem::fixup().
+The preferred naming convention is that the Fuse callback is named
+"getdir", the function hook is named e_getdir(), and the method is
+$fs->getdir(). The DBI::Filesystem object is stored in a singleton
+global named $Self. The hook fixes up the path it receives from Fuse,
+and then calls the getdir() method in an eval{} block. If the getdir()
+method raises an error such as "file not found", the error message is
+passed to the errno() method to turn into a ERRNO code, and this is
+returned to the caller. Otherwise, the hook returns the results in the
+format proscribed by Fuse.
 
-=back
+If you are subclassing DBI::Filesystem, there is no need to define new
+hook functions. All hooks described by Fuse are already defined or
+generated dynamically as needed. Simply create a correctly-named
+method in your subclass.
 
-sub fixup {
-    my $path = shift;
-    no warnings;
-    $path    =~ s!^/!!;
-    $path   || '/';
-}
+These are the hooks that are defined:
+
+ e_getdir       e_open           e_access      e_unlink
+ e_getattr      e_release        e_rename      e_rmdir
+ e_fgetattr     e_flush          e_chmod       e_utime
+ e_mkdir        e_read           e_chown
+ e_mknod        e_write          e_symlink
+ e_create       e_truncate       e_readlink
+
+These hooks will be created as needed if a subclass implements the
+corresponding methods:
+
+ e_statfs       e_lock            e_init 
+ e_fsync        e_opendir         e_destroy 
+ e_setxattr     e_readdir         e_utimens
+ e_getxattr     e_releasedir      e_bmap 
+ e_listxattr    e_fsyncdir        e_ioctl 
+ e_removexattr  e_ftruncate       e_poll
+
+=cut
 
 sub e_getdir {
     my $path = fixup(shift);
@@ -449,14 +476,14 @@ sub e_getdir {
 
 sub e_getattr {
     my $path  = fixup(shift);
-    my @stat  = eval {$Self->stat($path)};
+    my @stat  = eval {$Self->getattr($path)};
     return $Self->errno($@) if $@;
     return @stat;
 }
 
 sub e_fgetattr {
     my ($path,$inode) = @_;
-    my @stat  = eval {$Self->fstat(fixup($path),$inode)};
+    my @stat  = eval {$Self->fgetattr(fixup($path),$inode)};
     return $Self->errno($@) if $@;
     return @stat;
 }
@@ -468,7 +495,7 @@ sub e_mkdir {
     $mode   |= 0040000;
     my $ctx            = $Self->get_context();
     my $umask          = $ctx->{umask};
-    eval {$Self->create_directory($path,$mode&(~$umask))};
+    eval {$Self->mkdir($path,$mode&(~$umask))};
     return $Self->errno($@) if $@;
     return 0;
 }
@@ -478,7 +505,7 @@ sub e_mknod {
     my ($mode,$device) = @_;
     my $ctx            = $Self->get_context;
     my $umask          = $ctx->{umask};
-    eval {$Self->create_file($path,$mode&(~$umask),$device)};
+    eval {$Self->mknod($path,$mode&(~$umask),$device)};
     return $Self->errno($@) if $@;
     return 0;
 }
@@ -490,7 +517,7 @@ sub e_create {
     my $ctx            = $Self->get_context;
     my $umask          = $ctx->{umask};
     my $fh = eval {
-	$Self->create_file($path,$mode&(~$umask));
+	$Self->mknod($path,$mode&(~$umask));
 	$Self->open($path,$flags,{});
     };
     return $Self->errno($@) if $@;
@@ -547,7 +574,7 @@ sub e_truncate {
 
 sub e_link {
     my ($oldname,$newname) = @_;
-    eval {$Self->create_hardlink($oldname,$newname)};
+    eval {$Self->link($oldname,$newname)};
     return $Self->errno($@) if $@;
     return 0;
 }
@@ -562,8 +589,8 @@ sub e_access {
 sub e_rename {
     my ($oldname,$newname) = @_;
     eval { 
-	$Self->create_hardlink($oldname,$newname);
-	$Self->unlink_file($oldname);
+	$Self->link($oldname,$newname);
+	$Self->unlink($oldname);
     };
     return $Self->errno($@) if $@;
     return 0;
@@ -585,28 +612,28 @@ sub e_chown {
 
 sub e_symlink {
     my ($oldname,$newname) = @_;
-    eval {$Self->create_symlink($oldname,$newname)};
+    eval {$Self->symlink($oldname,$newname)};
     return $Self->errno($@) if $@;
     return 0;
 }
 
 sub e_readlink {
     my $path = shift;
-    my $link = eval {$Self->read_symlink($path)};
+    my $link = eval {$Self->readlink($path)};
     return $Self->errno($@) if $@;
     return $link;
 }
 
 sub e_unlink {
     my $path = shift;
-    eval {$Self->unlink_file($path)};
+    eval {$Self->unlink($path)};
     return $Self->errno($@) if $@;
     return 0;
 }
 
 sub e_rmdir {
     my $path = shift;
-    eval {$Self->remove_dir($path)};
+    eval {$Self->rmdir($path)};
     return $Self->errno($@) if $@;
     return 0;
 }
@@ -619,9 +646,49 @@ sub e_utime {
     return 0;
 }
 
+=head2 $fixed_path = fixup($path)
+
+This is an ordinary function (not a method) that removes the initial
+slash from paths passed to this module from Fuse. The root directory is unchanged:
+
+ Before      After fixup()
+ ------      -------------
+ /foo        foo
+ /foo/bar    foo/bar
+ /          /
+
+To call this method from subclasses, invoke it as DBI::Filesystem::fixup().
+
+=cut
+
+sub fixup {
+    my $path = shift;
+    no warnings;
+    $path    =~ s!^/!!;
+    $path   || '/';
+}
+
 ########################### DBI methods below ######################
 
+=head2 $dsn = $fs->dsn
+
+This method returns the DBI data source passed to new(). It cannot be
+changed.
+
+=cut
+
 sub dsn { shift->{dsn} }
+
+=head2 $dbh = $fs->dbh
+
+This method opens a connection to the database defined by dsn() and
+returns the database handle (or raises a fatal exception). The
+database handle will have its RaiseError and AutoCommit flags set to
+true. Since the mount function is multithreaded, there will be one
+database handle created per thread.
+
+=cut
+
 sub dbh {
     my $self = shift;
     my $dsn  = $self->dsn;
@@ -630,6 +697,454 @@ sub dbh {
 					       {RaiseError=>1,
 						AutoCommit=>1})} || do {warn $@; croak $@;};
 }
+
+=head2 $inode = $fs->mknod($path,$mode,$rdev)
+
+This method creates a file or special file (pipe, device file,
+etc). The arguments are the path of the file to create, the mode of
+the file, and the device number if creating a special device file, or
+0 if not.  The return value is the inode of the newly-created file, an
+unique integer ID, which is actually the primary key of the metadata
+table in the underlying database.
+
+The path in this, and all subsequent methods, is relative to the
+mountpoint. For example, if the filesystem is mounted on /tmp/foobar,
+and the file you wish to create is named /tmp/foobar/dir1/test.txt,
+then pass "dir1/test.txt". You can also include a leading slash (as in
+"/dir1/test.txt") which will simply be stripped off.
+
+The mode is a bitwise combination of file type and access mode as
+described for the st_mode field in the stat(2) man page. If you
+provide just the access mode (e.g. 0666), then the method will
+automatically set the file type bits to indicate that this is a
+regular file.
+
+The rdev field contains the major and minor device numbers for device
+special files, and is only needed when creating a device special file
+or pipe; ordinarily you can omit it. The rdev field is described in
+stat(2).
+
+Various exceptions can arise during this call including invalid paths,
+permission errors and the attempt to create a duplicate file
+name. These will be presented as fatal errors which can be trapped by
+an eval {}. See $fs->errno() for a list of potential error messages.
+
+Like other file-manipulation methods, this will die with a "permission
+denied" message if the current user does not have sufficient
+privileges to write into the desired directory. To disable permission
+checking, set ignore_permissions() to a true value:
+
+ $fs->ignore_permissions(1)
+
+=cut
+
+sub mknod { 
+    my $self = shift;
+    my ($path,$mode,$rdev) = @_;
+    $self->create_inode_and_path($path,'f',$mode,$rdev);
+}
+
+=head2 $inode = $fs->mkdir($path,$mode)
+
+Create a new directory with the specified path and mode and return the
+inode of the newly created directory. The path and mode are the same
+as those described for mknod(), except that the filetype bits for
+$mode will be set to those for a directory if not provided. Like
+mknod() this method may raise a fatal error, which should be trapped by an eval{}.
+
+=cut
+
+sub mkdir {
+    my $self = shift;
+    my ($path,$mode) = @_;
+    $self->create_inode_and_path($path,'d',$mode);
+}
+
+=head2 $fs->unlink($path)
+
+Unlink the file or symlink located at $path. If this is the last
+reference to the file (via hard links or filehandles) then the
+contents of the file and its inode will be permanently removed. This
+will raise a fatal exception on any errors.
+
+=cut
+
+sub unlink {
+    my $self  = shift;
+    my $path = shift;
+    my ($inode,$parent,$name)  = $self->path2inode($path) ;
+
+    $parent ||= 1;
+    $self->check_perm($parent,W_OK);
+
+    $name   ||= basename($path);
+
+    $self->_isdir($inode)      and croak "$path is a directory";
+    my $dbh                    = $self->dbh;
+    my $sth                    = $dbh->prepare_cached("delete from path where inode=? and parent=? and name=?") 
+	or die $dbh->errstr;
+    $sth->execute($inode,$parent,$name) or die $dbh->errstr;
+
+    eval {
+	$dbh->begin_work();
+	$dbh->do("update metadata set links=links-1 where inode=$inode");
+	$dbh->do("update metadata set links=links-1 where inode=$parent");
+	$self->touch($parent,'mtime');
+	$self->touch($parent,'ctime');
+	$dbh->commit();
+    };
+    if ($@) {
+	eval {$dbh->rollback()};
+	die "unlink failed due to $@";
+    }
+    $self->unlink_inode($inode);
+}
+
+=head2 $fs->rmdir($path)
+
+Remove the directory at $path. This method will fail under a variety
+of conditions, raising a fatal exception. Common errors include
+attempting to remove a file rather than a directory or removing a
+directory that is not empty.
+
+=cut
+
+sub rmdir {
+    my $self = shift;
+    my $path = shift;
+    my ($inode,$parent,$name) = $self->path2inode($path) ;
+    $self->check_perm($parent,W_OK);
+    $self->_isdir($inode)                or croak "$path is not a directory";
+    $self->_getdir($inode )             and croak "$path is not empty";
+
+    my $dbh   = $self->dbh;
+    eval {
+	$dbh->begin_work;
+	my $now = $self->_now_sql;
+	$dbh->do("update metadata set links=links-1,ctime=$now where inode=$inode");
+	$dbh->do("update metadata set links=links-1,ctime=$now where inode=$parent");
+	$dbh->do("delete from path where inode=$inode");
+	$self->touch($parent,'ctime');
+	$self->touch($parent,'mtime');
+	$self->unlink_inode($inode);
+	$dbh->commit;
+    };
+    if($@) {
+	eval {$dbh->rollback()};
+	die "update aborted due to $@";
+    }
+}    
+
+
+
+=head2 $fs->link($oldpath,$newpath)
+
+Create a hard link from the file at $oldpath to $newpath. If an error
+occurs the method will die. Note that this method will allow you to
+create a hard link to directories as well as files. This is disallowed
+by the "ln" command, and is generally a bad idea as you can create a
+filesystem with path loops.
+
+=cut
+
+sub link {
+    my $self = shift;
+    my ($oldpath,$newpath) = @_;
+    $self->check_perm(scalar $self->path2inode($self->_dirname($oldpath)),W_OK);
+    $self->check_perm(scalar $self->path2inode($self->_dirname($newpath)),W_OK);
+    my $inode  = $self->path2inode($oldpath);
+    $self->create_path($inode,$newpath);
+}
+
+=head2 $fs->symlink($oldpath,$newpath)
+
+Create a soft (symbolic) link from the file at $oldpath to
+$newpath. If an error occurs the method will die. It is safe to create
+symlinks that involve directories.
+
+=cut
+
+sub symlink {
+    my $self = shift;
+    my ($oldpath,$newpath) = @_;
+    my $newnode= $self->create_inode_and_path($newpath,'l',0120777);
+    $self->write($newpath,$oldpath);
+}
+
+=head2 $path = $fs->readlink($path)
+
+Read the symlink at $path and return its target. If an error occurs
+the method will die.
+
+=cut
+
+sub readlink {
+    my $self   = shift;
+    my $path   = shift;
+    my $target = $self->read($path,MAX_PATH_LEN);
+    return $target;
+}
+
+=head2 $fs->chown($path,$uid,$gid)
+
+This method changes the user and group ids for the indicated path. It
+raises a fatal exception on errors.
+
+=cut
+
+sub chown {
+    my $self              = shift;
+    my ($path,$uid,$gid)  = @_;
+    my $inode             = $self->path2inode($path) ;
+
+    # permission checking here
+    my $ctx = $self->get_context;
+    die "permission denied" unless $uid == 0xffffffff || $ctx->{uid} == 0;
+
+    my $groups            = $self->get_groups(@{$ctx}{'uid','gid'});
+    die "permission denied" unless $gid == 0xffffffff || $ctx->{uid} == 0 || $groups->{$gid};
+
+    my $dbh               = $self->dbh;
+    eval {
+	$dbh->begin_work();
+	$dbh->do("update metadata set uid=$uid where inode=$inode") if $uid!=0xffffffff;
+	$dbh->do("update metadata set gid=$gid where inode=$inode") if $gid!=0xffffffff;
+	$self->touch($inode,'ctime');
+	$dbh->commit();
+    };
+    if ($@) {
+	eval {$dbh->rollback()};
+	die "update aborted due to $@";
+    }
+}
+
+=head2 $fs->chmod($path,$mode)
+
+This method changes the access mode for the file or directory at the
+indicated path. The mode in this case is just the three octal word
+access mode, not the combination of access mode and path type used in
+mknod().
+
+=cut
+
+sub chmod {
+    my $self         = shift;
+    my ($path,$mode) = @_;
+    my $inode        = $self->path2inode($path) ;
+    my $dbh          = $self->dbh;
+    my $f000         = 0xf000;
+    my $now          = $self->_now_sql;
+    return $dbh->do("update metadata set mode=(($f000&mode)|$mode),ctime=$now where inode=$inode");
+}
+
+=head2 @stat = $fs->fgetattr($path,$inode)
+
+Return the 13-element file attribute list returned by Perl's stat()
+function, describing an existing file or directory. You may pass the
+path, and/or the inode of the file/directory. If both are passed, then
+the inode takes precedence.
+
+The returned list will contain:
+
+   0 dev      device number of filesystem
+   1 ino      inode number
+   2 mode     file mode  (type and permissions)
+   3 nlink    number of (hard) links to the file
+   4 uid      numeric user ID of file's owner
+   5 gid      numeric group ID of file's owner
+   6 rdev     the device identifier (special files only)
+   7 size     total size of file, in bytes
+   8 atime    last access time in seconds since the epoch
+   9 mtime    last modify time in seconds since the epoch
+  10 ctime    inode change time in seconds since the epoch (*)
+  11 blksize  preferred block size for file system I/O
+  12 blocks   actual number of blocks allocated
+
+=cut
+
+sub fgetattr {
+    my $self  = shift;
+    my ($path,$inode) = @_;
+    $inode ||= $self->path2inode;
+    my $dbh          = $self->dbh;
+    my ($ino,$mode,$uid,$gid,$rdev,$nlinks,$ctime,$mtime,$atime,$size) =
+	$dbh->selectrow_array($self->_fgetattr_sql($inode));
+    $ino or die $dbh->errstr;
+
+    # make sure write buffer contributes
+    if (my $blocks = $Blockbuff{$inode}) {
+	lock $blocks; 
+	if (keys %$blocks) { 
+	    my ($biggest) = sort {$b<=>$a} keys %$blocks; 
+	    my $offset    = $self->blocksize * $biggest + length $blocks->{$biggest}; 
+	    $size         = $offset if $offset > $size;
+	}
+    }
+
+    my $dev     = 0;
+    my $blocks  = 1;
+    my $blksize = $self->blocksize;
+    return ($dev,$ino,$mode,$nlinks,$uid,$gid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks);
+}
+
+=head2 @stat = $fs->getattr($path)
+
+Similar to fgetattr() but only the path is accepted.
+
+=cut
+
+sub getattr {
+    my $self         = shift;
+    my $path         = shift;
+    my $inode        = $self->path2inode($path);
+    return $self->fgetattr($path,$inode);
+}
+
+=head2 $inode = $fs->open($path,$flags,$info)
+
+Open the file at $path and return its inode. $flags are a numeric
+oring of stuff like O_RDONLY and O_SYNC, and $info is a hash reference
+containing flags from the Fuse module, which are currently ignored.
+
+This method checks read permissions on the file and execute
+permissions on all the directories on the file's path, unless
+ignore_permissions is set to true.
+
+=cut
+
+sub open {
+    my $self = shift;
+    my ($path,$flags,$info) = @_;
+    my $inode  = $self->path2inode($path);
+    $self->check_open_perm($inode,$flags);
+    # mtime=mtime to avoid updating the modification time!
+    $self->dbh->do("update metadata set inuse=inuse+1 where inode=$inode");
+    return $inode;
+}
+
+=head2 $data = $fs->read($path,$length,$offset,$inode)
+
+Read $length bytes of data from the file at $path, starting at
+position $offset. You may optionally pass an inode to the method to
+read from a previously-opened file.
+
+On success, the requested data will be returned. Otherwise a fatal
+exception will be raised (which can be trapped with an eval{}).
+
+=cut
+
+sub read {
+    my $self = shift;
+    my ($path,$length,$offset,$inode) = @_;
+
+    unless ($inode) {
+	$inode  = $self->path2inode($path);
+	$self->_isdir($inode) and croak "$path is a directory";
+    }
+    $offset  ||= 0;
+
+    my $blksize     = $self->blocksize;
+    my $first_block = int($offset / $blksize);
+    my $last_block  = int(($offset+$length) / $blksize);
+    my $start       = $offset % $blksize;
+    
+    $self->flush(undef,$inode);
+    my $get_atime = $self->_get_unix_timestamp_sql('atime');
+    my $get_mtime = $self->_get_unix_timestamp_sql('mtime');
+    my ($current_length,$atime,$mtime) = 
+	$self->dbh->selectrow_array("select length,$get_atime,$get_mtime from metadata where inode=$inode");
+    if ($length+$offset > $current_length) {
+	$length = $current_length - $offset;
+    }
+    my $data = $self->_read_direct($inode,$start,$length,$first_block,$last_block);
+    $self->touch($inode,'atime') if length $data && $atime < $mtime;
+    return $data;
+}
+
+# This type of read is invoked when there is no write buffer for
+# the file. It executes a single SQL query across the data table.
+sub _read_direct {
+    my $self = shift;
+    my ($inode,$start,$length,$first_block,$last_block) = @_;
+
+    my $dbh = $self->dbh;
+    my $sth = $dbh->prepare_cached(<<END);
+select block,contents 
+   from extents where inode=? 
+   and block between ? and ?
+   order by block
+END
+;
+    $sth->execute($inode,$first_block,$last_block);
+
+    my $blksize     = $self->blocksize;
+    my $previous_block;
+    my $data = '';
+    while (my ($block,$contents) = $sth->fetchrow_array) {
+	$previous_block = $block unless defined $previous_block;
+	# a hole spanning an entire block
+	if ($block - $previous_block > 1) {
+	    $data .= "\0"x($blksize*($block-$previous_block-1));
+	}
+	$previous_block = $block;
+	
+	# a hole spanning a portion of a block
+	if (length $contents < $blksize && $block < $last_block) {
+	    $contents .= "\0"x($blksize-length($contents));  # this is a hole!
+	}
+	$data      .= substr($contents,$start,$length);
+	$length    -= $blksize;
+	$start      = 0;
+    }
+    $sth->finish();
+    return $data;
+}
+
+sub file_length {
+    my $self = shift;
+    my $inode = shift;
+    my @stat  = $self->fgetattr(undef,$inode);
+    return $stat[7];
+}
+
+sub access {
+    my $self = shift;
+    my ($path,$access_mode) = @_;
+    my $inode = $Self->path2inode($path);
+    return $self->check_perm($inode,$access_mode);
+}
+
+sub check_open_perm {
+    my $self = shift;
+    my ($inode,$flags) = @_;
+    $flags         &= 0x3;
+    my $wants_read  = $flags==O_RDONLY || $flags==O_RDWR;
+    my $wants_write = $flags==O_WRONLY || $flags==O_RDWR;
+    my $mask        = 0000;
+    $mask          |= R_OK if $wants_read;
+    $mask          |= W_OK if $wants_write;
+    return $self->check_perm($inode,$mask);
+}
+
+
+
+=head2 $inode = $fs->create_inode($type,$mode,$rdev,$uid,$gid)
+
+This method creates a new inode in the database. An inode corresponds
+to a file, directory, symlink, pipe or block special device, and has a
+unique integer ID defining it as its primary key. Arguments are the
+type of inode to create, which is used to check that the passed mode
+is correct ('f'=file, 'd'=directory,'l'=symlink; anything else is
+ignored), the mode of the inode, which is a combination of type and
+access permissions as described in stat(2), the device ID if a special
+file, and the desired UID and GID.
+
+The return value is the newly-created inode ID.
+
+You will ordinarily use the mknod() and mkdir() methods to create
+files, directories and special files.
+
+=cut
 
 sub create_inode {
     my $self        = shift;
@@ -640,7 +1155,7 @@ sub create_inode {
 	$mode |=  $type eq 'f' ? 0100000
 	         :$type eq 'd' ? 0040000
 	         :$type eq 'l' ? 0120000
-	         :0100000;  # default
+	         :0000000;  # default
     }
 
     $uid  ||= 0;
@@ -658,29 +1173,6 @@ sub last_inserted_inode {
     my $self = shift;
     my $dbh  = shift;
     return $dbh->last_insert_id(undef,undef,undef,undef);
-}
-
-sub create_hardlink {
-    my $self = shift;
-    my ($oldpath,$newpath) = @_;
-    $self->check_perm(scalar $self->path2inode($self->_dirname($oldpath)),W_OK);
-    $self->check_perm(scalar $self->path2inode($self->_dirname($newpath)),W_OK);
-    my $inode  = $self->path2inode($oldpath);
-    $self->create_path($inode,$newpath);
-}
-
-sub create_symlink {
-    my $self = shift;
-    my ($oldpath,$newpath) = @_;
-    my $newnode= $self->create_inode_and_path($newpath,'l',0120777);
-    $self->write($newpath,$oldpath);
-}
-
-sub read_symlink {
-    my $self   = shift;
-    my $path   = shift;
-    my $target = $self->read($path,MAX_PATH_LEN);
-    return $target;
 }
 
 # this links an inode to a path
@@ -727,48 +1219,6 @@ sub create_inode_and_path {
     return $inode;
 }
 
-sub create_file { 
-    my $self = shift;
-    my ($path,$mode,$rdev) = @_;
-    $self->create_inode_and_path($path,'f',$mode,$rdev);
-}
-
-sub create_directory {
-    my $self = shift;
-    my ($path,$mode) = @_;
-    $self->create_inode_and_path($path,'d',$mode);
-}
-
-sub unlink_file {
-    my $self  = shift;
-    my $path = shift;
-    my ($inode,$parent,$name)  = $self->path2inode($path) ;
-
-    $parent ||= 1;
-    $self->check_perm($parent,W_OK);
-
-    $name   ||= basename($path);
-
-    $self->_isdir($inode)      and croak "$path is a directory";
-    my $dbh                    = $self->dbh;
-    my $sth                    = $dbh->prepare_cached("delete from path where inode=? and parent=? and name=?") 
-	or die $dbh->errstr;
-    $sth->execute($inode,$parent,$name) or die $dbh->errstr;
-
-    eval {
-	$dbh->begin_work();
-	$dbh->do("update metadata set links=links-1 where inode=$inode");
-	$dbh->do("update metadata set links=links-1 where inode=$parent");
-	$self->touch($parent,'mtime');
-	$self->touch($parent,'ctime');
-	$dbh->commit();
-    };
-    if ($@) {
-	eval {$dbh->rollback()};
-	die "unlink failed due to $@";
-    }
-    $self->unlink_inode($inode);
-}
 
 sub unlink_inode {
     my $self = shift;
@@ -786,248 +1236,6 @@ sub unlink_inode {
 	eval {$dbh->rollback};
 	die "commit aborted due to $@";
     }
-}
-
-sub remove_dir {
-    my $self = shift;
-    my $path = shift;
-    my ($inode,$parent,$name) = $self->path2inode($path) ;
-    $self->check_perm($parent,W_OK);
-    $self->_isdir($inode)                or croak "$path is not a directory";
-    $self->_getdir($inode )             and croak "$path is not empty";
-
-    my $dbh   = $self->dbh;
-    eval {
-	$dbh->begin_work;
-	my $now = $self->_now_sql;
-	$dbh->do("update metadata set links=links-1,ctime=$now where inode=$inode");
-	$dbh->do("update metadata set links=links-1,ctime=$now where inode=$parent");
-	$dbh->do("delete from path where inode=$inode");
-	$self->touch($parent,'ctime');
-	$self->touch($parent,'mtime');
-	$self->unlink_inode($inode);
-	$dbh->commit;
-    };
-    if($@) {
-	eval {$dbh->rollback()};
-	die "update aborted due to $@";
-    }
-}    
-
-sub chown {
-    my $self              = shift;
-    my ($path,$uid,$gid)  = @_;
-    my $inode             = $self->path2inode($path) ;
-
-    # permission checking here
-    my $ctx = $self->get_context;
-    die "permission denied" unless $uid == 0xffffffff || $ctx->{uid} == 0;
-
-    my $groups            = $self->get_groups(@{$ctx}{'uid','gid'});
-    die "permission denied" unless $gid == 0xffffffff || $ctx->{uid} == 0 || $groups->{$gid};
-
-    my $dbh               = $self->dbh;
-    eval {
-	$dbh->begin_work();
-	$dbh->do("update metadata set uid=$uid where inode=$inode") if $uid!=0xffffffff;
-	$dbh->do("update metadata set gid=$gid where inode=$inode") if $gid!=0xffffffff;
-	$self->touch($inode,'ctime');
-	$dbh->commit();
-    };
-    if ($@) {
-	eval {$dbh->rollback()};
-	die "update aborted due to $@";
-    }
-}
-
-sub chmod {
-    my $self         = shift;
-    my ($path,$mode) = @_;
-    my $inode        = $self->path2inode($path) ;
-    my $dbh          = $self->dbh;
-    my $f000         = 0xf000;
-    my $now          = $self->_now_sql;
-    return $dbh->do("update metadata set mode=(($f000&mode)|$mode),ctime=$now where inode=$inode");
-}
-
-sub fstat {
-    my $self  = shift;
-    my ($path,$inode) = @_;
-    $inode ||= $self->path2inode;
-    my $dbh          = $self->dbh;
-    my ($ino,$mode,$uid,$gid,$rdev,$nlinks,$ctime,$mtime,$atime,$size) =
-	$dbh->selectrow_array($self->_fstat_sql($inode));
-    $ino or die $dbh->errstr;
-
-    # make sure write buffer contributes
-    if (my $blocks = $Blockbuff{$inode}) {
-	lock $blocks; 
-	if (keys %$blocks) { 
-	    my ($biggest) = sort {$b<=>$a} keys %$blocks; 
-	    my $offset    = $self->blocksize * $biggest + length $blocks->{$biggest}; 
-	    $size         = $offset if $offset > $size;
-	}
-    }
-
-    my $dev     = 0;
-    my $blocks  = 1;
-    my $blksize = $self->blocksize;
-    return ($dev,$ino,$mode,$nlinks,$uid,$gid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks);
-}
-
-sub stat {
-    my $self         = shift;
-    my $path         = shift;
-    my $inode        = $self->path2inode($path);
-    return $self->fstat($path,$inode);
-}
-
-sub read {
-    my $self = shift;
-    my ($path,$length,$offset,$inode) = @_;
-
-    unless ($inode) {
-	$inode  = $self->path2inode($path);
-	$self->_isdir($inode) and croak "$path is a directory";
-    }
-    $offset  ||= 0;
-
-    my $blksize     = $self->blocksize;
-    my $first_block = int($offset / $blksize);
-    my $last_block  = int(($offset+$length) / $blksize);
-    my $start       = $offset % $blksize;
-    
-    $self->flush(undef,$inode);
-    my $get_atime = $self->_get_unix_timestamp_sql('atime');
-    my $get_mtime = $self->_get_unix_timestamp_sql('mtime');
-    my ($current_length,$atime,$mtime) = 
-	$self->dbh->selectrow_array("select length,$get_atime,$get_mtime from metadata where inode=$inode");
-    if ($length+$offset > $current_length) {
-	$length = $current_length - $offset;
-    }
-    my $data = $self->_read_direct($inode,$start,$length,$first_block,$last_block);
-    $self->touch($inode,'atime') if length $data && $atime < $mtime;
-    return $data;
-}
-
-# This type of read checks the write buffer for cached data.
-# If cached doesn't exist, then performs one SQL query for each block.
-# COMMENTED BECAUSE IT ACTUALLY SLOWS PERFORMANCE!
-# sub _read_cached {
-#     my $self = shift;
-#     my ($blocks,$inode,$start,$length,$first_block,$last_block) = @_;
-
-#     my $dbh = $self->dbh;
-#     my $sth = $dbh->prepare_cached(<<END);
-# select contents 
-#    from data where inode=? 
-#    and block=?
-# END
-# ;
-#     my $previous_block;
-#     my $data = '';
-#     for (my $block=$first_block;$block<=$last_block;$block++) {
-# 	my $contents;
-# 	if ($blocks->{$block}) {
-# 	    $contents = $blocks->{$block};
-# 	} else {
-# 	    $sth->execute($inode,$block);
-# 	    ($contents) = $sth->fetchrow_array;
-# 	}
-# 	next unless length $contents;
-
-# 	$previous_block = $block unless defined $previous_block;
-# 	# a hole spanning an entire block
-# 	if ($block - $previous_block > 1) {
-# 	    $data .= "\0"x(BLOCKSIZE*($block-$previous_block-1));
-# 	}
-# 	$previous_block = $block;
-	
-# 	# a hole spanning a portion of a block
-# 	if (length $contents < BLOCKSIZE && $block < $last_block) {
-# 	    $contents .= "\0"x(BLOCKSIZE-length($contents));  # this is a hole!
-# 	}
-# 	$data      .= substr($contents,$start,$length);
-# 	$length    -= BLOCKSIZE;
-# 	$start      = 0;
-#     }
-#     $sth->finish;
-#     return $data;
-# }
-
-# This type of read is invoked when there is no write buffer for
-# the file. It executes a single SQL query across the data table.
-sub _read_direct {
-    my $self = shift;
-    my ($inode,$start,$length,$first_block,$last_block) = @_;
-
-    my $dbh = $self->dbh;
-    my $sth = $dbh->prepare_cached(<<END);
-select block,contents 
-   from extents where inode=? 
-   and block between ? and ?
-   order by block
-END
-;
-    $sth->execute($inode,$first_block,$last_block);
-
-    my $blksize     = $self->blocksize;
-    my $previous_block;
-    my $data = '';
-    while (my ($block,$contents) = $sth->fetchrow_array) {
-	$previous_block = $block unless defined $previous_block;
-	# a hole spanning an entire block
-	if ($block - $previous_block > 1) {
-	    $data .= "\0"x($blksize*($block-$previous_block-1));
-	}
-	$previous_block = $block;
-	
-	# a hole spanning a portion of a block
-	if (length $contents < $blksize && $block < $last_block) {
-	    $contents .= "\0"x($blksize-length($contents));  # this is a hole!
-	}
-	$data      .= substr($contents,$start,$length);
-	$length    -= $blksize;
-	$start      = 0;
-    }
-    $sth->finish();
-    return $data;
-}
-
-sub file_length {
-    my $self = shift;
-    my $inode = shift;
-    my @stat  = $self->fstat(undef,$inode);
-    return $stat[7];
-}
-
-sub open {
-    my $self = shift;
-    my ($path,$flags,$info) = @_;
-    my $inode  = $self->path2inode($path);
-    $self->check_open_perm($inode,$flags);
-    # mtime=mtime to avoid updating the modification time!
-    $self->dbh->do("update metadata set inuse=inuse+1 where inode=$inode");
-    return $inode;
-}
-
-sub access {
-    my $self = shift;
-    my ($path,$access_mode) = @_;
-    my $inode = $Self->path2inode($path);
-    return $self->check_perm($inode,$access_mode);
-}
-
-sub check_open_perm {
-    my $self = shift;
-    my ($inode,$flags) = @_;
-    $flags         &= 0x3;
-    my $wants_read  = $flags==O_RDONLY || $flags==O_RDWR;
-    my $wants_write = $flags==O_WRONLY || $flags==O_RDWR;
-    my $mask        = 0000;
-    $mask          |= R_OK if $wants_read;
-    $mask          |= W_OK if $wants_write;
-    return $self->check_perm($inode,$mask);
 }
 
 # traverse path recursively, checking for X permission
@@ -1233,7 +1441,7 @@ sub truncate {
     $length  ||= 0;
 
     # check that length isn't greater than current position
-    my @stat   = $self->stat($path);
+    my @stat   = $self->getattr($path);
     $stat[7] >= $length or croak "length beyond end of file";
 
     my $last_block = int($length/$self->blocksize);
@@ -1308,16 +1516,16 @@ sub _getdir {
 }
 
 sub errno {
-    my $self = shift;
+    my $self    = shift;
     my $message = shift;
-    warn $message if $message =~ /^(dbd|dbi)/i;
-    return -ENOENT()    if $@ =~ /not found/;
-    return -EISDIR()    if $@ =~ /is a directory/;
-    return -ENOTDIR()   if $@ =~ /not a directory/;
-    return -EINVAL()    if $@ =~ /length beyond end of file/;
-    return -ENOTEMPTY() if $@ =~ /not empty/;
-    return -EACCES()    if $@ =~ /permission denied/;
-    return -EIO()       if $@;
+    return -ENOENT()    if $message =~ /not found/;
+    return -EISDIR()    if $message =~ /is a directory/;
+    return -ENOTDIR()   if $message =~ /not a directory/;
+    return -EINVAL()    if $message =~ /length beyond end of file/;
+    return -ENOTEMPTY() if $message =~ /not empty/;
+    return -EACCES()    if $message =~ /permission denied/;
+    warn $message;      # something unexpected happened!
+    return -EIO();
 }
 
 # in scalar context return inode
@@ -1485,7 +1693,7 @@ sub get_context {
 }
 
 ################# a few SQL fragments; most are inline or in the DBD-specific descendents ######
-sub _fstat_sql {
+sub _fgetattr_sql {
     my $self  = shift;
     my $inode = shift;
     my $times = join ',',map{$self->_get_unix_timestamp_sql($_)} 'ctime','mtime','atime';
