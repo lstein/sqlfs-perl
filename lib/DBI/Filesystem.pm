@@ -166,7 +166,9 @@ the source, following this recipe:
  $ make test   (optional)
  $ sudo make install
 
-=head1 METHODS
+=head1 HIGH LEVEL METHODS
+
+The following methods are most likely to be needed by users of this module.
 
 =cut
 
@@ -348,6 +350,7 @@ sub mount {
 	flush       => "$pkg\:\:e_flush",
 	read        => "$pkg\:\:e_read",
 	write       => "$pkg\:\:e_write",
+	ftruncate   => "$pkg\:\:e_ftruncate",
 	truncate    => "$pkg\:\:e_truncate",
 	create      => "$pkg\:\:e_create",
 	mknod       => "$pkg\:\:e_mknod",
@@ -381,7 +384,7 @@ sub _subclass_implemented_calls{
     my @u = (qw(statfs fsync 
                 setxattr getxattr listxattr removexattr
                 opendir readdir releasedir fsyncdir
-                init destroy ftruncate lock utimens
+                init destroy lock utimens
                 bmap ioctl poll));
     my @implemented = grep {$self->can($_)} @u;
 
@@ -463,7 +466,7 @@ corresponding methods:
  e_setxattr     e_readdir         e_utimens
  e_getxattr     e_releasedir      e_bmap 
  e_listxattr    e_fsyncdir        e_ioctl 
- e_removexattr  e_ftruncate       e_poll
+ e_removexattr  e_poll
 
 =cut
 
@@ -572,6 +575,14 @@ sub e_truncate {
     return 0;
 }
 
+sub e_ftruncate {
+    my ($path,$offset,$inode) = @_;
+    $path = fixup($path);
+    eval {$Self->truncate($path,$offset,$inode)};
+    return $Self->errno($@) if $@;
+    return 0;
+}
+
 sub e_link {
     my ($oldname,$newname) = @_;
     eval {$Self->link($oldname,$newname)};
@@ -644,58 +655,6 @@ sub e_utime {
     my $result = eval {$Self->utime($path,$atime,$mtime)};
     return $Self->errno($@) if $@;
     return 0;
-}
-
-=head2 $fixed_path = fixup($path)
-
-This is an ordinary function (not a method) that removes the initial
-slash from paths passed to this module from Fuse. The root directory is unchanged:
-
- Before      After fixup()
- ------      -------------
- /foo        foo
- /foo/bar    foo/bar
- /          /
-
-To call this method from subclasses, invoke it as DBI::Filesystem::fixup().
-
-=cut
-
-sub fixup {
-    my $path = shift;
-    no warnings;
-    $path    =~ s!^/!!;
-    $path   || '/';
-}
-
-########################### DBI methods below ######################
-
-=head2 $dsn = $fs->dsn
-
-This method returns the DBI data source passed to new(). It cannot be
-changed.
-
-=cut
-
-sub dsn { shift->{dsn} }
-
-=head2 $dbh = $fs->dbh
-
-This method opens a connection to the database defined by dsn() and
-returns the database handle (or raises a fatal exception). The
-database handle will have its RaiseError and AutoCommit flags set to
-true. Since the mount function is multithreaded, there will be one
-database handle created per thread.
-
-=cut
-
-sub dbh {
-    my $self = shift;
-    my $dsn  = $self->dsn;
-    return $self->{dbh} ||= eval {DBI->connect($dsn,
-					       undef,undef,
-					       {RaiseError=>1,
-						AutoCommit=>1})} || do {warn $@; croak $@;};
 }
 
 =head2 $inode = $fs->mknod($path,$mode,$rdev)
@@ -885,6 +844,58 @@ sub readlink {
     return $target;
 }
 
+=head2 @entries = $fs->getdir($path)
+
+Given a directory in $path, return a list of all entries (files,
+directories) contained within that directory. The '.' and '..' paths
+are also always returned. This method checks that the current user has
+read and execute permissions on the directory, and will raise a
+permission denied error if not (trap this with an eval{}).
+
+=cut
+
+sub getdir {
+    my $self = shift;
+    my $path = shift;
+    my $inode = $self->path2inode($path);
+    $self->_isdir($inode) or croak "not directory";
+    $self->check_perm($inode,X_OK|R_OK);
+    return $self->_getdir($inode);
+}
+
+sub _getdir {
+    my $self  = shift;
+    my $inode = shift;
+    my $dbh   = $self->dbh;
+    my $col   = $dbh->selectcol_arrayref("select name from path where parent=$inode");
+    return '.','..',@$col;
+}
+
+=head2 $boolean = $fs->isdir($path)
+
+Convenience method. Returns true if the path corresponds to a
+directory. May raise a fatal error if the provided path is invalid.
+
+=cut
+
+sub isdir {
+    my $self = shift;
+    my $path = shift;
+    my $inode = $self->path2inode($path) ;
+    return $self->_isdir($inode);
+}
+
+sub _isdir {
+    my $self  = shift;
+    my $inode = shift;
+    my $dbh   = $self->dbh;
+    my $mask  = 0xf000;
+    my $isdir = 0x4000;
+    my ($result) = $dbh->selectrow_array("select ($mask&mode)=$isdir from metadata where inode=$inode")
+	or die $dbh->errstr;
+    return $result;
+}
+
 =head2 $fs->chown($path,$uid,$gid)
 
 This method changes the user and group ids for the indicated path. It
@@ -1002,13 +1013,18 @@ sub getattr {
 
 =head2 $inode = $fs->open($path,$flags,$info)
 
-Open the file at $path and return its inode. $flags are a numeric
-oring of stuff like O_RDONLY and O_SYNC, and $info is a hash reference
-containing flags from the Fuse module, which are currently ignored.
+Open the file at $path and return its inode. $flags are a bitwise
+OR-ing of the access mode constants including O_RDONLY, O_WRONLY,
+O_RDWR, O_CREAT, and $info is a hash reference containing flags from
+the Fuse module. The latter is currently ignored.
 
-This method checks read permissions on the file and execute
-permissions on all the directories on the file's path, unless
-ignore_permissions is set to true.
+This method checks read/write permissions on the file and containing
+directories, unless ignore_permissions is set to true. The open method
+also increments the file's inuse counter, ensuring that even if it is
+unlinked, its contents will not be removed until the last open
+filehandle is closed.
+
+The flag constants can be obtained from POSIX.
 
 =cut
 
@@ -1017,10 +1033,27 @@ sub open {
     my ($path,$flags,$info) = @_;
     my $inode  = $self->path2inode($path);
     $self->check_open_perm($inode,$flags);
-    # mtime=mtime to avoid updating the modification time!
     $self->dbh->do("update metadata set inuse=inuse+1 where inode=$inode");
     return $inode;
 }
+
+=head2 $fh->release($inode)
+
+Release a file previously opened with open(), decrementing its inuse
+count. Be careful to balance calls to open() with release(), or the
+file will have an inconsistent use count.
+
+=cut
+
+sub release {
+    my ($self,$inode) = @_;
+    $self->flush(undef,$inode);  # write cached blocks
+    my $dbh = $self->dbh;
+    $dbh->do("update metadata set inuse=inuse-1 where inode=$inode");
+    $self->unlink_inode($inode);
+    return 0;
+}
+
 
 =head2 $data = $fs->read($path,$length,$offset,$inode)
 
@@ -1030,6 +1063,10 @@ read from a previously-opened file.
 
 On success, the requested data will be returned. Otherwise a fatal
 exception will be raised (which can be trapped with an eval{}).
+
+Note that you do not need to open the file before reading from
+it. Permission checking is not performed in this call, but in the
+(optional) open() call.
 
 =cut
 
@@ -1061,254 +1098,20 @@ sub read {
     return $data;
 }
 
-# This type of read is invoked when there is no write buffer for
-# the file. It executes a single SQL query across the data table.
-sub _read_direct {
-    my $self = shift;
-    my ($inode,$start,$length,$first_block,$last_block) = @_;
+=head2 $bytes = $fs->write($path,$data,$offset,$inode)
 
-    my $dbh = $self->dbh;
-    my $sth = $dbh->prepare_cached(<<END);
-select block,contents 
-   from extents where inode=? 
-   and block between ? and ?
-   order by block
-END
-;
-    $sth->execute($inode,$first_block,$last_block);
+Write the data provided in $data into the file at $path, starting at
+position $offset. You may optionally pass an inode to the method to
+read from a previously-opened file.
 
-    my $blksize     = $self->blocksize;
-    my $previous_block;
-    my $data = '';
-    while (my ($block,$contents) = $sth->fetchrow_array) {
-	$previous_block = $block unless defined $previous_block;
-	# a hole spanning an entire block
-	if ($block - $previous_block > 1) {
-	    $data .= "\0"x($blksize*($block-$previous_block-1));
-	}
-	$previous_block = $block;
-	
-	# a hole spanning a portion of a block
-	if (length $contents < $blksize && $block < $last_block) {
-	    $contents .= "\0"x($blksize-length($contents));  # this is a hole!
-	}
-	$data      .= substr($contents,$start,$length);
-	$length    -= $blksize;
-	$start      = 0;
-    }
-    $sth->finish();
-    return $data;
-}
+On success, the number of bytes written will be returned. Otherwise a fatal
+exception will be raised (which can be trapped with an eval{}).
 
-sub file_length {
-    my $self = shift;
-    my $inode = shift;
-    my @stat  = $self->fgetattr(undef,$inode);
-    return $stat[7];
-}
-
-sub access {
-    my $self = shift;
-    my ($path,$access_mode) = @_;
-    my $inode = $Self->path2inode($path);
-    return $self->check_perm($inode,$access_mode);
-}
-
-sub check_open_perm {
-    my $self = shift;
-    my ($inode,$flags) = @_;
-    $flags         &= 0x3;
-    my $wants_read  = $flags==O_RDONLY || $flags==O_RDWR;
-    my $wants_write = $flags==O_WRONLY || $flags==O_RDWR;
-    my $mask        = 0000;
-    $mask          |= R_OK if $wants_read;
-    $mask          |= W_OK if $wants_write;
-    return $self->check_perm($inode,$mask);
-}
-
-
-
-=head2 $inode = $fs->create_inode($type,$mode,$rdev,$uid,$gid)
-
-This method creates a new inode in the database. An inode corresponds
-to a file, directory, symlink, pipe or block special device, and has a
-unique integer ID defining it as its primary key. Arguments are the
-type of inode to create, which is used to check that the passed mode
-is correct ('f'=file, 'd'=directory,'l'=symlink; anything else is
-ignored), the mode of the inode, which is a combination of type and
-access permissions as described in stat(2), the device ID if a special
-file, and the desired UID and GID.
-
-The return value is the newly-created inode ID.
-
-You will ordinarily use the mknod() and mkdir() methods to create
-files, directories and special files.
+Note that the file does not previously need to have been opened in
+order to write to it, and permission checking is not performed at this
+level. This checking is performed in the (optional) open() call.
 
 =cut
-
-sub create_inode {
-    my $self        = shift;
-    my ($type,$mode,$rdev,$uid,$gid) = @_;
-
-    unless (defined $mode) {
-	$mode  = 0777 ;
-	$mode |=  $type eq 'f' ? 0100000
-	         :$type eq 'd' ? 0040000
-	         :$type eq 'l' ? 0120000
-	         :0000000;  # default
-    }
-
-    $uid  ||= 0;
-    $gid  ||= 0;
-    $rdev ||= 0;
-
-    my $dbh = $self->dbh;
-    my $sth = $dbh->prepare_cached($self->_create_inode_sql);
-    $sth->execute($mode,$uid,$gid,$rdev,$type eq 'd' ? 1 : 0) or die $sth->errstr;
-    $sth->finish;
-    return $self->last_inserted_inode($dbh);
-}
-
-sub last_inserted_inode {
-    my $self = shift;
-    my $dbh  = shift;
-    return $dbh->last_insert_id(undef,undef,undef,undef);
-}
-
-# this links an inode to a path
-sub create_path {
-    my $self = shift;
-    my ($inode,$path) = @_;
-
-    my $parent = $self->path2inode($self->_dirname($path));
-    my $base   = basename($path);
-    $base      =~ s!/!_!g;
-
-    my $dbh  = $self->dbh;
-    my $sth  = $dbh->prepare_cached('insert into path (inode,name,parent) values (?,?,?)');
-    $sth->execute($inode,$base,$parent)           or die $sth->errstr;
-    $sth->finish;
-
-    $dbh->do("update metadata set links=links+1 where inode=$inode");
-    $dbh->do("update metadata set links=links+1 where inode=$parent");
-    $self->touch($parent,'ctime');
-    $self->touch($parent,'mtime');
-}
-
-sub create_inode_and_path {
-    my $self = shift;
-    my ($path,$type,$mode,$rdev) = @_;
-    my $dbh    = $self->dbh;
-    my $inode;
-
-    my $parent = $self->path2inode($self->_dirname($path));
-    $self->check_perm($parent,W_OK);
-
-    my $ctx = $self->get_context;
-
-    eval {
-	$dbh->begin_work;
-	$inode  = $self->create_inode($type,$mode,$rdev,@{$ctx}{'uid','gid'});
-	$self->create_path($inode,$path);
-	$dbh->commit;
-    };
-    if ($@) {
-	eval{$dbh->rollback()};
-	die "commit failed due to $@";
-    }
-    return $inode;
-}
-
-
-sub unlink_inode {
-    my $self = shift;
-    my $inode = shift;
-    my $dbh   = $self->dbh;
-    my ($references) = $dbh->selectrow_array("select links+inuse from metadata where inode=$inode");
-    return if $references > 0;
-    eval {
-	$dbh->begin_work;
-	$dbh->do("delete from metadata where inode=$inode") or die $dbh->errstr;
-	$dbh->do("delete from extents  where inode=$inode") or die $dbh->errstr;
-	$dbh->commit;
-    };
-    if ($@) {
-	eval {$dbh->rollback};
-	die "commit aborted due to $@";
-    }
-}
-
-# traverse path recursively, checking for X permission
-sub check_path {
-    my $self = shift;
-    my ($dir,$inode,$uid,$gid) = @_;
-
-    return 1 if $self->ignore_permissions;
-
-    my $groups   = $self->get_groups($uid,$gid);
-
-    my $dbh      = $self->dbh;
-    my $sth = $dbh->prepare_cached(<<END);
-select p.parent,m.mode,m.uid,m.gid
-       from path as p,metadata as m
-       where p.inode=m.inode
-       and   p.inode=? and p.name=?
-END
-;
-    my $name  = basename($dir);
-    my $ok  = 1;
-    while ($ok) {
-	$sth->execute($inode,$name);
-	my ($node,$mode,$owner,$group) = $sth->fetchrow_array() or last;
-	my $mask     = $uid==$owner       ? S_IXUSR
-	               :$groups->{$group} ? S_IXGRP
-                       :S_IXOTH;
-	my $allowed = $mask & $mode;
-	$ok &&= $allowed;
-	$inode          = $node;
-	$dir            = $self->_dirname($dir);
-	$name           = basename($dir);
-    }
-    $sth->finish;
-    return $ok;
-}
-
-sub check_perm {
-    my $self = shift;
-    my ($inode,$access_mode) = @_;
-
-    return 1 if $self->ignore_permissions;
-
-    my $ctx = $self->get_context;
-    my ($uid,$gid) = @{$ctx}{'uid','gid'};
-
-    return 0 if $uid==0; # root can do anything
-
-    my $dbh      = $self->dbh;
-
-    my $fff = 0xfff;
-    my ($mode,$owner,$group) 
-	= $dbh->selectrow_array("select $fff&mode,uid,gid from metadata where inode=$inode");
-
-    my $groups      = $self->get_groups($uid,$gid);
-    my $perm_word   = $uid==$owner      ? $mode >> 6
-                     :$groups->{$group} ? $mode >> 3
-                     :$mode;
-    $perm_word     &= 07;
-
-    $access_mode==($perm_word & $access_mode) or die "permission denied";
-    return 0;
-}     
-
-sub release {
-    my ($self,$inode) = @_;
-    $self->flush(undef,$inode);  # write cached blocks
-    my $dbh = $self->dbh;
-    # mtime=mtime to avoid updating the modification time!
-    $dbh->do("update metadata set inuse=inuse-1 where inode=$inode");
-    $self->unlink_inode($inode);
-    return 0;
-}
 
 sub write {
     my $self = shift;
@@ -1369,30 +1172,6 @@ sub write {
     return $bytes_written;
 }
 
-sub flush {
-    my $self  = shift;
-    my ($path,$inode) = @_;
-
-    $inode  ||= $self->path2inode($path) if $path;
-
-    # if called with no inode, then recursively call ourselves
-    # to flush all cached inodes
-    unless ($inode) {
-	for my $i (keys %{$self->{blockbuff}}) {
-	    $self->flush(undef,$i);
-	}
-	return;
-    }
-
-    my $blocks  = $Blockbuff{$inode} or return;
-    my $blksize = $self->blocksize;
-
-    lock $blocks;
-    my $result = $self->_write_blocks($inode,$blocks,$blksize) or die "flush failed";
-
-    delete $Blockbuff{$inode};
-}
-
 sub _write_blocks {
     my $self = shift;
     my ($inode,$blocks,$blksize) = @_;
@@ -1430,11 +1209,104 @@ END
     1;
 }
 
+=head2 $fs->flush( [$path,[$inode]] )
+
+Before data is written to the database, it is cached for a while in
+memory. flush() will force data to be written to the database. You may
+pass no arguments, in which case all cached data will be written, or
+you may provide the path and/or inode to an existing file to flush
+just the unwritten data associated with that file.
+
+=cut
+
+sub flush {
+    my $self  = shift;
+    my ($path,$inode) = @_;
+
+    $inode  ||= $self->path2inode($path) if $path;
+
+    # if called with no inode, then recursively call ourselves
+    # to flush all cached inodes
+    unless ($inode) {
+	for my $i (keys %{$self->{blockbuff}}) {
+	    $self->flush(undef,$i);
+	}
+	return;
+    }
+
+    my $blocks  = $Blockbuff{$inode} or return;
+    my $blksize = $self->blocksize;
+
+    lock $blocks;
+    my $result = $self->_write_blocks($inode,$blocks,$blksize) or die "flush failed";
+
+    delete $Blockbuff{$inode};
+}
+
+# This type of read is invoked when there is no write buffer for
+# the file. It executes a single SQL query across the data table.
+sub _read_direct {
+    my $self = shift;
+    my ($inode,$start,$length,$first_block,$last_block) = @_;
+
+    my $dbh = $self->dbh;
+    my $sth = $dbh->prepare_cached(<<END);
+select block,contents 
+   from extents where inode=? 
+   and block between ? and ?
+   order by block
+END
+;
+    $sth->execute($inode,$first_block,$last_block);
+
+    my $blksize     = $self->blocksize;
+    my $previous_block;
+    my $data = '';
+    while (my ($block,$contents) = $sth->fetchrow_array) {
+	$previous_block = $block unless defined $previous_block;
+	# a hole spanning an entire block
+	if ($block - $previous_block > 1) {
+	    $data .= "\0"x($blksize*($block-$previous_block-1));
+	}
+	$previous_block = $block;
+	
+	# a hole spanning a portion of a block
+	if (length $contents < $blksize && $block < $last_block) {
+	    $contents .= "\0"x($blksize-length($contents));  # this is a hole!
+	}
+	$data      .= substr($contents,$start,$length);
+	$length    -= $blksize;
+	$start      = 0;
+    }
+    $sth->finish();
+    return $data;
+}
+
+=head2 $fs->truncate($path,$length)
+
+Shorten the contents of the file located at $path to the length
+indicated by $length.
+
+=cut
+
 sub truncate {
     my $self = shift;
     my ($path,$length) = @_;
+    $self->ftruncate($path,$length);
+}
 
-    my $inode = $self->path2inode($path);
+=head2 $fs->ftruncate($path,$length,$inode)
+
+Like truncate() but you may provide the inode instead of the path.
+This is called by Fuse to truncate an open file.
+
+=cut
+
+sub ftruncate {
+    my $self = shift;
+    my ($path,$length,$inode) = @_;
+
+    $inode ||= $self->path2inode($path);
     $self->_isdir($inode) and croak "$path is a directory";
 
     my $dbh    = $self->dbh;
@@ -1461,23 +1333,13 @@ sub truncate {
     1;
 }
 
-sub isdir {
-    my $self = shift;
-    my $path = shift;
-    my $inode = $self->path2inode($path) ;
-    return $self->_isdir($inode);
-}
+=head2 $fs->utime($path,$atime,$mtime)
 
-sub _isdir {
-    my $self  = shift;
-    my $inode = shift;
-    my $dbh   = $self->dbh;
-    my $mask  = 0xf000;
-    my $isdir = 0x4000;
-    my ($result) = $dbh->selectrow_array("select ($mask&mode)=$isdir from metadata where inode=$inode")
-	or die $dbh->errstr;
-    return $result;
-}
+Update the atime and mtime of the indicated file or directory to the
+values provided. You must have write permissions to the file in order
+to do this.
+
+=cut
 
 sub utime {
     my $self = shift;
@@ -1491,29 +1353,72 @@ sub utime {
     return $result;
 }
 
-sub touch {
-    my $self  = shift;
-    my ($inode,$field) = @_;
-    my $now = $self->_now_sql;
-    $self->dbh->do("update metadata set $field=$now where inode=$inode");
-}
+=head2 $fs->access($path,$access_mode)
 
-sub getdir {
+This method checks the current user's permissions for a file or
+directory. The arguments are the path to the item of interest, and the
+mode is one of the following constants:
+
+ F_OK   check for existence of file
+
+or a bitwise OR of one or more of:
+
+ R_OK   check that the file can be read
+ W_OK   check that the file can be written to
+ X_OK   check that the file is executable
+
+These constants can be obtained from the POSIX module.
+
+=cut
+
+sub access {
     my $self = shift;
-    my ($path,$uid,$gid) = @_;
-    my $inode = $self->path2inode($path);
-    $self->_isdir($inode) or croak "not directory";
-    $self->check_perm($inode,X_OK|R_OK);
-    return $self->_getdir($inode);
+    my ($path,$access_mode) = @_;
+    my $inode = $Self->path2inode($path);
+    return $self->check_perm($inode,$access_mode);
 }
 
-sub _getdir {
-    my $self  = shift;
-    my $inode = shift;
-    my $dbh   = $self->dbh;
-    my $col   = $dbh->selectcol_arrayref("select name from path where parent=$inode");
-    return '.','..',@$col;
+sub check_open_perm {
+    my $self = shift;
+    my ($inode,$flags) = @_;
+    $flags         &= 0x3;
+    my $wants_read  = $flags==O_RDONLY || $flags==O_RDWR;
+    my $wants_write = $flags==O_WRONLY || $flags==O_RDWR;
+    my $mask        = 0000;
+    $mask          |= R_OK if $wants_read;
+    $mask          |= W_OK if $wants_write;
+    return $self->check_perm($inode,$mask);
 }
+
+=head2 $errno = $fs->errno($message)
+
+Most methods defined by this module are called within an eval{} to
+trap errors. On an error, the message contained in $@ is passed to
+errno() to turn it into a UNIX error code. The error code is then
+returned to the Fuse module.
+
+The following is the limited set of mappings performed:
+
+  Eval{} error message       Unix Errno   Context
+  --------------------       ----------   -------
+
+  not found                  ENOENT       Path lookups
+  is a directory             EISDIR       Attempt to open/read/write a directory
+  not a directory            ENOTDIR      Attempt to list entries from a file
+  length beyond end of file  EINVAL       Truncate file to longer than current length
+  not empty                  ENOTEMPTY    Attempt to remove a directory that is in use
+  permission denied          EACCESS      Access modes don't allow requested operation
+
+The full error message usually has further detailed information. For
+example the full error message for "not found" is "$path not found"
+where $path contains the requested path.
+
+All other errors, including problems in the underlying DBI database
+layer, result in an error code of EIO ("I/O error"). These constants
+can be obtained from POSIX.
+
+=cut
+
 
 sub errno {
     my $self    = shift;
@@ -1527,6 +1432,561 @@ sub errno {
     warn $message;      # something unexpected happened!
     return -EIO();
 }
+
+=head1 LOW LEVEL METHODS
+
+The following methods may be of interest for those who wish to
+understand how this module works, or want to subclass and extend this
+module.
+
+=cut
+
+=head2 $fs->initialize_schema
+
+This method is called to initialize the database schema. The database
+must already exist and be writable by the current user. All previous
+data will be deleted from the database.
+
+The default schema contains three tables:
+
+ metadata -- Information about the inode used for the stat() call. This
+             includes its length, modification and access times, 
+             permissions, and ownership. There is one row per inode,
+             and the inode is the table's primary key.
+
+ path     -- Maps paths to inodes. Each row is a distinct component
+             of a path and contains the name of the component, the 
+             inode of the parent component, and the inode corresponding
+             to the component. This is illustrated below.
+
+ extents  -- Maps inodes to the contents of the file. Each row consists
+             of the inode of the file, the block number of the data, and
+             a blob containing the data in that block.
+
+For the mysql adapter, here is the current schema:
+
+metadata:
+
+ +--------+------------+------+-----+---------------------+----------------+
+ | Field  | Type       | Null | Key | Default             | Extra          |
+ +--------+------------+------+-----+---------------------+----------------+
+ | inode  | int(10)    | NO   | PRI | NULL                | auto_increment |
+ | mode   | int(10)    | NO   |     | NULL                |                |
+ | uid    | int(10)    | NO   |     | NULL                |                |
+ | gid    | int(10)    | NO   |     | NULL                |                |
+ | rdev   | int(10)    | YES  |     | 0                   |                |
+ | links  | int(10)    | YES  |     | 0                   |                |
+ | inuse  | int(10)    | YES  |     | 0                   |                |
+ | length | bigint(20) | YES  |     | 0                   |                |
+ | mtime  | timestamp  | NO   |     | 0000-00-00 00:00:00 |                |
+ | ctime  | timestamp  | NO   |     | 0000-00-00 00:00:00 |                |
+ | atime  | timestamp  | NO   |     | 0000-00-00 00:00:00 |                |
+ +--------+------------+------+-----+---------------------+----------------+
+
+path:
+
+ +--------+--------------+------+-----+---------+-------+
+ | Field  | Type         | Null | Key | Default | Extra |
+ +--------+--------------+------+-----+---------+-------+
+ | inode  | int(10)      | NO   |     | NULL    |       |
+ | name   | varchar(255) | NO   |     | NULL    |       |
+ | parent | int(10)      | YES  | MUL | NULL    |       |
+ +--------+--------------+------+-----+---------+-------+
+
+extents:
+
+ +----------+---------+------+-----+---------+-------+
+ | Field    | Type    | Null | Key | Default | Extra |
+ +----------+---------+------+-----+---------+-------+
+ | inode    | int(10) | YES  | MUL | NULL    |       |
+ | block    | int(10) | YES  |     | NULL    |       |
+ | contents | blob    | YES  |     | NULL    |       |
+ +----------+---------+------+-----+---------+-------+
+
+The B<metadata table> is straightforward. The meaning of most columns
+can be inferred from the stat(2) manual page. The only columns that
+may be mysterious are "links" and "inuse". "links" describes the
+number of distinct paths involving a file or directory. Files start
+out with one link and are incremented by one every time a hardlink is
+created (symlinks don't count). Directories start out with two links
+(one for '..' and the other for '.') and are incremented by one every
+time a file or subdirectory is added to the directory. The "inuse"
+column is incremented every time a file is opened for reading or
+writing, and decremented when the file is closed. It is used to
+prevent the content from being deleted if the file is still in use.
+
+The B<path table> is organized to allow rapid translation from a pathname
+to an inode. Each entry in the tree is identified by its inode, its
+name, and the inode of its parent directory. The inode of the root "/"
+node is hard-coded to 1. The following steps show the effect of
+creating subdirectories and files on the path table:
+
+After initial filesystem initialization there is only one entry
+in paths corresponding to the root directory. The root has no parent:
+
+ +-------+------+--------+
+ | inode | name | parent |
+ +-------+------+--------+
+ |     1 | /    |   NULL |
+ +-------+------+--------+
+
+$ mkdir directory1
+ +-------+------------+--------+
+ | inode | name       | parent |
+ +-------+------------+--------+
+ |     1 | /          |   NULL |
+ |     2 | directory1 |      1 |
+ +-------+------------+--------+
+
+$ mkdir directory1/subdir_1_1
+
+ +-------+------------+--------+
+ | inode | name       | parent |
+ +-------+------------+--------+
+ |     1 | /          |   NULL |
+ |     2 | directory1 |      1 |
+ |     3 | subdir_1_1 |      2 |
+ +-------+------------+--------+
+
+$ mkdir directory2
+
+ +-------+------------+--------+
+ | inode | name       | parent |
+ +-------+------------+--------+
+ |     1 | /          |   NULL |
+ |     2 | directory1 |      1 |
+ |     3 | subdir_1_1 |      2 |
+ |     4 | directory2 |      1 |
+ +-------+------------+--------+
+
+$ touch directory2/file1.txt
+
+ +-------+------------+--------+
+ | inode | name       | parent |
+ +-------+------------+--------+
+ |     1 | /          |   NULL |
+ |     2 | directory1 |      1 |
+ |     3 | subdir_1_1 |      2 |
+ |     4 | directory2 |      1 |
+ |     5 | file1.txt  |      4 |
+ +-------+------------+--------+
+
+$ ln directory2/file1.txt link_to_file1.txt
+
+ +-------+-------------------+--------+
+ | inode | name              | parent |
+ +-------+-------------------+--------+
+ |     1 | /                 |   NULL |
+ |     2 | directory1        |      1 |
+ |     3 | subdir_1_1        |      2 |
+ |     4 | directory2        |      1 |
+ |     5 | file1.txt         |      4 |
+ |     5 | link_to_file1.txt |      1 |
+ +-------+-------------------+--------+
+
+Notice in the last step how creating a hard link establishes a second
+entry with the same inode as the original file, but with a different
+name and parent.
+
+The inode for path /directory2/file1.txt can be found with this
+recursive-in-spirit SQL fragment:
+
+ select inode from path where name="file1.txt" 
+              and parent in 
+                (select inode from path where name="directory2" 
+                              and parent in
+                                (select 1)
+                )
+
+The B<extents table> provides storage of file (and symlink)
+contents. During testing, it turned out that storing the entire
+contents of a file into a single BLOB column provided very poor random
+access performance. So instead the contents are now broken into blocks
+of constant size 4096 bytes. Each row of the table corresponds to the
+inode of the file, the block number (starting at 0), and the data
+contained within the block. In addition to dramatically better
+read/write performance, this scheme allows sparse files (files
+containing "holes") to be stored efficiently: Blocks that fall within
+holes are completely absent from the table, while those that lead into
+a hole are shorter than the full block length.
+
+The logical length of the file is stored in the metadata length
+column.
+
+=cut
+
+sub initialize_schema {
+    my $self = shift;
+    local $self->{dbh};  # to avoid cloning database handle into child threads
+    my $dbh  = $self->dbh;
+    $dbh->do('drop table if exists metadata') or croak $dbh->errstr;
+    $dbh->do('drop table if exists path')     or croak $dbh->errstr;
+    $dbh->do('drop table if exists extents')  or croak $dbh->errstr;
+    
+    $dbh->do($_) foreach split ';',$self->_metadata_table_def;
+    $dbh->do($_) foreach split ';',$self->_path_table_def;
+    $dbh->do($_) foreach split ';',$self->_extents_table_def;
+
+    # create the root node
+    # should update this to use fuse_get_context to get proper uid, gid and masked permissions
+    my $ctx  = $self->get_context;
+    my $mode = (0040000|0777)&~$ctx->{umask};
+    my $uid = $ctx->{uid};
+    my $gid = $ctx->{gid};
+    my $timestamp = $self->_now_sql();
+    # potential bug here -- we assume the inode column begins at "1" automatically
+    $dbh->do("insert into metadata (mode,uid,gid,links,mtime,ctime,atime) values($mode,$uid,$gid,2,$timestamp,$timestamp,$timestamp)") 
+	or croak $dbh->errstr;
+    $dbh->do("insert into path (inode,name,parent) values (1,'/',null)")
+	or croak $dbh->errstr;
+}
+
+sub check_schema {
+    my $self     = shift;
+    local $self->{dbh};  # to avoid cloning database handle into child threads
+    my ($result) = eval {
+	$self->dbh->selectrow_array(<<END);
+select 1 from metadata as m,path as p left join extents as e on e.inode=p.inode where m.inode=1 and p.parent=1
+END
+    };
+    return !$@;
+}
+
+=head2 $size = $fs->blocksize
+
+This method returns the blocksize (currently 4096 bytes) used for
+writing and retrieving file contents to the extents table. Because
+4096 is a typical value used by libc, altering the value in subclasses
+will probably degrade performance. Also be aware that altering the
+blocksize will render filesystems created with other blocksize values
+unreadable.
+
+=cut
+
+sub blocksize   { return 4096 }
+
+=head2 $count = $fs->flushblocks
+
+This method returns the maximum number of blocks of file contents data
+that can be stored in memory before it is written to disk. Because all
+blocks are written to the database in a single transaction, this can
+have a dramatic performance effect and it is worth trying different
+values when tuning the module for new DBMSs.
+
+The default is 64.
+
+=cut
+
+sub flushblocks { return   64 }
+
+
+=head2 $fixed_path = fixup($path)
+
+This is an ordinary function (not a method!) that removes the initial
+slash from paths passed to this module from Fuse. The root directory
+(/) is not changed:
+
+ Before      After fixup()
+ ------      -------------
+ /foo        foo
+ /foo/bar    foo/bar
+ /          /
+
+To call this method from subclasses, invoke it as DBI::Filesystem::fixup().
+
+=cut
+
+sub fixup {
+    my $path = shift;
+    no warnings;
+    $path    =~ s!^/!!;
+    $path   || '/';
+}
+
+=head2 $dsn = $fs->dsn
+
+This method returns the DBI data source passed to new(). It cannot be
+changed.
+
+=cut
+
+sub dsn { shift->{dsn} }
+
+=head2 $dbh = $fs->dbh
+
+This method opens a connection to the database defined by dsn() and
+returns the database handle (or raises a fatal exception). The
+database handle will have its RaiseError and AutoCommit flags set to
+true. Since the mount function is multithreaded, there will be one
+database handle created per thread.
+
+=cut
+
+sub dbh {
+    my $self = shift;
+    my $dsn  = $self->dsn;
+    return $self->{dbh} ||= eval {DBI->connect($dsn,
+					       undef,undef,
+					       {RaiseError=>1,
+						AutoCommit=>1})} || do {warn $@; croak $@;};
+}
+
+=head2 $inode = $fs->create_inode($type,$mode,$rdev,$uid,$gid)
+
+This method creates a new inode in the database. An inode corresponds
+to a file, directory, symlink, pipe or block special device, and has a
+unique integer ID defining it as its primary key. Arguments are the
+type of inode to create, which is used to check that the passed mode
+is correct ('f'=file, 'd'=directory,'l'=symlink; anything else is
+ignored), the mode of the inode, which is a combination of type and
+access permissions as described in stat(2), the device ID if a special
+file, and the desired UID and GID.
+
+The return value is the newly-created inode ID.
+
+You will ordinarily use the mknod() and mkdir() methods to create
+files, directories and special files.
+
+=cut
+
+sub create_inode {
+    my $self        = shift;
+    my ($type,$mode,$rdev,$uid,$gid) = @_;
+
+    unless (defined $mode) {
+	$mode  = 0777 ;
+	$mode |=  $type eq 'f' ? 0100000
+	         :$type eq 'd' ? 0040000
+	         :$type eq 'l' ? 0120000
+	         :0000000;  # default
+    }
+
+    $uid  ||= 0;
+    $gid  ||= 0;
+    $rdev ||= 0;
+
+    my $dbh = $self->dbh;
+    my $sth = $dbh->prepare_cached($self->_create_inode_sql);
+    $sth->execute($mode,$uid,$gid,$rdev,$type eq 'd' ? 1 : 0) or die $sth->errstr;
+    $sth->finish;
+    return $self->last_inserted_inode($dbh);
+}
+
+=head2 $id = $fs->last_inserted_inode($dbh)
+
+After a new inode is inserted into the database, this method returns
+its ID. Unique inode IDs are generated using various combinations of
+database autoincrement and sequence semantics, which vary from DBMS to
+DBMS, so you may need to override this method in subclasses.
+
+The default is simply to call DBI's last_insert_id method:
+
+ $dbh->last_insert_id(undef,undef,undef,undef)
+
+=cut
+
+sub last_inserted_inode {
+    my $self = shift;
+    my $dbh  = shift;
+    return $dbh->last_insert_id(undef,undef,undef,undef);
+}
+
+=head2 $self->create_path($inode,$path)
+
+After creating an inode, you can associate it with a path in the
+filesystem using this method. It will raise an error if unsuccessful.
+
+=cut
+
+# this links an inode to a path
+sub create_path {
+    my $self = shift;
+    my ($inode,$path) = @_;
+
+    my $parent = $self->path2inode($self->_dirname($path));
+    my $base   = basename($path);
+    $base      =~ s!/!_!g;
+
+    my $dbh  = $self->dbh;
+    my $sth  = $dbh->prepare_cached('insert into path (inode,name,parent) values (?,?,?)');
+    $sth->execute($inode,$base,$parent)           or die $sth->errstr;
+    $sth->finish;
+
+    $dbh->do("update metadata set links=links+1 where inode=$inode");
+    $dbh->do("update metadata set links=links+1 where inode=$parent");
+    $self->touch($parent,'ctime');
+    $self->touch($parent,'mtime');
+}
+
+=head2 $inode=$self->create_inode_and_path($path,$type,$mode,$rdev)
+
+Create an inode and associate it with the indicated path, returning
+the inode ID. Arguments are the path, the file type (one of 'd', 'f',
+or 'l' for directory, file or symbolic link). As usual, this may exit
+with a fatal error.
+
+=cut
+
+sub create_inode_and_path {
+    my $self = shift;
+    my ($path,$type,$mode,$rdev) = @_;
+    my $dbh    = $self->dbh;
+    my $inode;
+
+    my $parent = $self->path2inode($self->_dirname($path));
+    $self->check_perm($parent,W_OK);
+
+    my $ctx = $self->get_context;
+
+    eval {
+	$dbh->begin_work;
+	$inode  = $self->create_inode($type,$mode,$rdev,@{$ctx}{'uid','gid'});
+	$self->create_path($inode,$path);
+	$dbh->commit;
+    };
+    if ($@) {
+	eval{$dbh->rollback()};
+	die "commit failed due to $@";
+    }
+    return $inode;
+}
+
+=head2 $fs->unlink_inode($inode)
+
+Given an inode, this deletes it and its contents, but only if the file
+is no longer in use. It will die with an exception if the changes
+cannot be committed to the database.
+
+=cut
+
+
+sub unlink_inode {
+    my $self = shift;
+    my $inode = shift;
+    my $dbh   = $self->dbh;
+    my ($references) = $dbh->selectrow_array("select links+inuse from metadata where inode=$inode");
+    return if $references > 0;
+    eval {
+	$dbh->begin_work;
+	$dbh->do("delete from metadata where inode=$inode") or die $dbh->errstr;
+	$dbh->do("delete from extents  where inode=$inode") or die $dbh->errstr;
+	$dbh->commit;
+    };
+    if ($@) {
+	eval {$dbh->rollback};
+	die "commit aborted due to $@";
+    }
+}
+
+=head2 $boolean = $fs->check_path($name,$inode,$uid,$gid)
+
+Given a directory's name, inode, and the UID and GID of the current
+user, this will traverse all containing directories checking that
+their execute permissions are set. If the directory and all of its
+parents are executable by the current user, then returns true.
+
+=cut
+
+# traverse path recursively, checking for X permission
+sub check_path {
+    my $self = shift;
+    my ($dir,$inode,$uid,$gid) = @_;
+
+    return 1 if $self->ignore_permissions;
+
+    my $groups   = $self->get_groups($uid,$gid);
+
+    my $dbh      = $self->dbh;
+    my $sth = $dbh->prepare_cached(<<END);
+select p.parent,m.mode,m.uid,m.gid
+       from path as p,metadata as m
+       where p.inode=m.inode
+       and   p.inode=? and p.name=?
+END
+;
+    my $name  = basename($dir);
+    my $ok  = 1;
+    while ($ok) {
+	$sth->execute($inode,$name);
+	my ($node,$mode,$owner,$group) = $sth->fetchrow_array() or last;
+	my $mask     = $uid==$owner       ? S_IXUSR
+	               :$groups->{$group} ? S_IXGRP
+                       :S_IXOTH;
+	my $allowed = $mask & $mode;
+	$ok &&= $allowed;
+	$inode          = $node;
+	$dir            = $self->_dirname($dir);
+	$name           = basename($dir);
+    }
+    $sth->finish;
+    return $ok;
+}
+
+=head2 $fs->check_perm($inode,$access_mode)
+
+Given a file or directory's inode and the access mode (a bitwise OR of
+RD_OK, WR_OK, X_OK), checks whether the current user is allowed
+access. This will return if access is allowed, or raise a fatal error
+otherwise.
+
+=cut
+
+sub check_perm {
+    my $self = shift;
+    my ($inode,$access_mode) = @_;
+
+    return 1 if $self->ignore_permissions;
+
+    my $ctx = $self->get_context;
+    my ($uid,$gid) = @{$ctx}{'uid','gid'};
+
+    return 0 if $uid==0; # root can do anything
+
+    my $dbh      = $self->dbh;
+
+    my $fff = 0xfff;
+    my ($mode,$owner,$group) 
+	= $dbh->selectrow_array("select $fff&mode,uid,gid from metadata where inode=$inode");
+
+    my $groups      = $self->get_groups($uid,$gid);
+    my $perm_word   = $uid==$owner      ? $mode >> 6
+                     :$groups->{$group} ? $mode >> 3
+                     :$mode;
+    $perm_word     &= 07;
+
+    $access_mode==($perm_word & $access_mode) or die "permission denied";
+    return 0;
+}     
+
+=head2 $fs->touch($inode,$field)
+
+This updates the file/directory indicated by $inode to the current
+time. $field is one of 'atime', 'ctime' or 'mtime'.
+
+=cut
+
+sub touch {
+    my $self  = shift;
+    my ($inode,$field) = @_;
+    my $now = $self->_now_sql;
+    $self->dbh->do("update metadata set $field=$now where inode=$inode");
+}
+
+=head2 $inode = $fs->path2inode($path)
+
+=head2 ($inode,$parent_inode,$name) = $self->path2inode($path)
+
+This method takes a filesystem path and transforms it into an inode if
+the path is valid. In a scalar context this method return just the
+inode. In a list context, it returns a three element list consisting
+of the inode, the inode of the containing directory, and the basename
+of the file.
+
+This method does permission and access path checking, and will die
+with a "permission denied" error if either check fails. In addition,
+passing an invalid path will return a "path not found" error.
+
+=cut
 
 # in scalar context return inode
 # in list context return (inode,parent_inode,name)
@@ -1555,6 +2015,21 @@ sub _path2inode {
     $sth->finish;
     return @v;
 }
+
+=head2 @paths = $fs->inode2paths($inode)
+
+Given an inode, this method returns the path(s) that correspond to
+it. There may be multiple paths since file inodes can have hard
+links. In addition, there may be NO path corresponding to an inode, if
+the file is open but all externally accessible links have been
+unlinked.
+
+Be aware that the B<path table> is indexed to make path to inode
+searches fast, not the other way around. If you build a content search
+engine on top of DBI::Filesystem and rely on this method, you may wish
+to add an index to the path table's "inode" field.
+
+=cut
 
 # returns a list of paths that correspond to an inode
 # because files can be hardlinked, there may be multiple paths!
@@ -1594,6 +2069,7 @@ sub _dirname {
     $dir     = '/' if $dir eq '.'; # work around funniness in dirname()    
     return $dir;
 }
+
 sub _path2inode_sql {
     my $self   = shift;
     my $path   = shift;
@@ -1623,42 +2099,14 @@ END
 ;
 }
 
-sub initialize_schema {
-    my $self = shift;
-    local $self->{dbh};  # to avoid cloning database handle into child threads
-    my $dbh  = $self->dbh;
-    $dbh->do('drop table if exists metadata') or croak $dbh->errstr;
-    $dbh->do('drop table if exists path')     or croak $dbh->errstr;
-    $dbh->do('drop table if exists extents')  or croak $dbh->errstr;
-    
-    $dbh->do($_) foreach split ';',$self->_metadata_table_def;
-    $dbh->do($_) foreach split ';',$self->_path_table_def;
-    $dbh->do($_) foreach split ';',$self->_extents_table_def;
+=head2 $groups = $fs->get_groups($uid,$gid)
 
-    # create the root node
-    # should update this to use fuse_get_context to get proper uid, gid and masked permissions
-    my $ctx  = $self->get_context;
-    my $mode = (0040000|0777)&~$ctx->{umask};
-    my $uid = $ctx->{uid};
-    my $gid = $ctx->{gid};
-    my $timestamp = $self->_now_sql();
-    # potential bug here -- we assume the inode column begins at "1" automatically
-    $dbh->do("insert into metadata (mode,uid,gid,links,mtime,ctime,atime) values($mode,$uid,$gid,2,$timestamp,$timestamp,$timestamp)") 
-	or croak $dbh->errstr;
-    $dbh->do("insert into path (inode,name,parent) values (1,'/',null)")
-	or croak $dbh->errstr;
-}
+This method takes a UID and GID, and returns the primary and
+supplemental groups to which the user is assigned, and is used during
+permission checking. The result is a hashref in which the keys are the
+groups to which the user belongs.
 
-sub check_schema {
-    my $self     = shift;
-    local $self->{dbh};  # to avoid cloning database handle into child threads
-    my ($result) = eval {
-	$self->dbh->selectrow_array(<<END);
-select 1 from metadata as m,path as p left join extents as e on e.inode=p.inode where m.inode=1 and p.parent=1
-END
-    };
-    return !$@;
-}
+=cut
 
 sub get_groups {
     my $self = shift;
@@ -1679,6 +2127,15 @@ sub _get_groups {
     endgrent;
     return \%result;
 }
+
+=head2 $ctx = $fs->get_context
+
+This method is a wrapper around the fuse_get_context() function
+described in L<Fuse>. If called before the filesystem is mounted, then
+it fakes the call, returning a context object based on the information
+in the current process.
+
+=cut
 
 sub get_context {
     my $self = shift;
@@ -1710,9 +2167,6 @@ sub _create_inode_sql {
     my $now = $self->_now_sql;
     return "insert into metadata (mode,uid,gid,rdev,links,mtime,ctime,atime) values(?,?,?,?,?,$now,$now,$now)";
 }
-
-sub blocksize   { return 4096 }
-sub flushblocks { return   64 }
 
 1;
 

@@ -23,9 +23,9 @@ END
 sub _path_table_def {
     return <<END;
 create table path (
-    inode        int(10)      not null,
-    name         varchar(255) not null,
     parent       int(10),
+    name         varchar(255) not null,
+    inode        int(10)      not null,
     index path (parent,name)
 ) ENGINE=INNODB
 END
