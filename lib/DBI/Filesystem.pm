@@ -1634,8 +1634,7 @@ sub initialize_schema {
     my $uid = $ctx->{uid};
     my $gid = $ctx->{gid};
     my $timestamp = $self->_now_sql();
-    # potential bug here -- we assume the inode column begins at "1" automatically
-    $dbh->do("insert into metadata (mode,uid,gid,links,mtime,ctime,atime) values($mode,$uid,$gid,2,$timestamp,$timestamp,$timestamp)") 
+    $dbh->do("insert into metadata (inode,mode,uid,gid,links,mtime,ctime,atime) values (1,$mode,$uid,$gid,2,$timestamp,$timestamp,$timestamp)") 
 	or croak $dbh->errstr;
     $dbh->do("insert into path (inode,name,parent) values (1,'/',null)")
 	or croak $dbh->errstr;
