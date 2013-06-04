@@ -25,7 +25,7 @@ sub SQLite {
     my $self = shift;
     $tmpdir  = File::Temp->newdir();
     my $testfile = "$tmpdir/filesystem.sql";
-    my $dsn      = "dbi:SQLite:database=$testfile";
+    my $dsn      = "dbi:SQLite:dbname=$testfile";
     my $dbh      = DBI->connect($dsn,undef,undef,{PrintError=>0}) or return;
     return $dsn;
 }

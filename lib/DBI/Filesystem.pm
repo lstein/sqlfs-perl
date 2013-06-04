@@ -180,7 +180,7 @@ use threads;
 use threads::shared;
 use File::Basename 'basename','dirname';
 use File::Spec;
-use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO EPERM
+use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO EPERM EEXIST
              O_RDONLY O_WRONLY O_RDWR O_CREAT F_OK R_OK W_OK X_OK
              S_IXUSR S_IXGRP S_IXOTH);
 use Carp 'croak';
@@ -222,6 +222,8 @@ sub new {
 
     my ($dbd)          = $dsn =~ /dbi:([^:]+)/;
     $dbd or croak "Could not figure out the DBI subclass to load from $dsn";
+
+    $options ||= {};
 
     # load the appropriate DBD subclass and fix up its @ISA so that we become
     # the parent class
@@ -700,7 +702,12 @@ checking, set ignore_permissions() to a true value:
 sub mknod { 
     my $self = shift;
     my ($path,$mode,$rdev) = @_;
-    $self->create_inode_and_path($path,'f',$mode,$rdev);
+    my $result = eval {$self->create_inode_and_path($path,'f',$mode,$rdev)};
+    if ($@) {
+	die "file exists" if $@ =~ /not unique/;
+	die $@;
+    }
+    return $result;
 }
 
 =head2 $inode = $fs->mkdir($path,$mode)
@@ -1403,6 +1410,7 @@ The following is the limited set of mappings performed:
   --------------------       ----------   -------
 
   not found                  ENOENT       Path lookups
+  file exists                EEXIST       Path creation
   is a directory             EISDIR       Attempt to open/read/write a directory
   not a directory            ENOTDIR      Attempt to list entries from a file
   length beyond end of file  EINVAL       Truncate file to longer than current length
@@ -1424,6 +1432,7 @@ sub errno {
     my $self    = shift;
     my $message = shift;
     return -ENOENT()    if $message =~ /not found/;
+    return -EEXIST()    if $message =~ /file exists/;
     return -EISDIR()    if $message =~ /is a directory/;
     return -ENOTDIR()   if $message =~ /not a directory/;
     return -EINVAL()    if $message =~ /length beyond end of file/;
@@ -1808,7 +1817,7 @@ sub create_path {
 
     my $dbh  = $self->dbh;
     my $sth  = $dbh->prepare_cached('insert into path (inode,name,parent) values (?,?,?)');
-    $sth->execute($inode,$base,$parent)           or die $sth->errstr;
+    $sth->execute($inode,$base,$parent);
     $sth->finish;
 
     $dbh->do("update metadata set links=links+1 where inode=$inode");
@@ -1844,8 +1853,9 @@ sub create_inode_and_path {
 	$dbh->commit;
     };
     if ($@) {
+	my $message = $@;
 	eval{$dbh->rollback()};
-	die "commit failed due to $@";
+	die "commit failed due to $message";
     }
     return $inode;
 }

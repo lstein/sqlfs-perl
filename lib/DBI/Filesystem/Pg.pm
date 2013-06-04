@@ -48,7 +48,7 @@ END
 
 sub _extents_table_def {
     return <<END;
-create table data (
+create table extents (
     inode        integer,
     block        integer,
     contents     bytea
