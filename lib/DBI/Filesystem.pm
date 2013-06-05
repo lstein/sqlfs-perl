@@ -954,10 +954,10 @@ sub chown {
     # permission checking here
     unless ($self->ignore_permissions) {
 	my $ctx = $self->get_context;
-	die "permission denied" unless $uid == 0xffffffff || $ctx->{uid} == 0;
+	die "permission denied" unless $uid == 0xffffffff || $ctx->{uid} == 0 || $ctx->{uid}==$uid;
 
 	my $groups            = $self->get_groups(@{$ctx}{'uid','gid'});
-	die "permission denied" unless $gid == 0xffffffff || $ctx->{uid} == 0 || $groups->{$gid};
+	die "permission denied" unless $gid == 0xffffffff || $ctx->{uid} == 0 || $ctx->{gid}==$gid || $groups->{$gid};
     }
 
     my $dbh               = $self->dbh;
@@ -988,7 +988,7 @@ sub chmod {
     my $self         = shift;
     my ($path,$mode) = @_;
     my $inode        = $self->path2inode($path) ;
-    $self->check_perm($inode,W_OK);
+    $self->check_perm($inode,F_OK);
     my $dbh          = $self->dbh;
     my $f000         = 0xf000;
     my $now          = $self->_now_sql;
@@ -1121,6 +1121,8 @@ sub read {
     my $self = shift;
     my ($path,$length,$offset,$inode) = @_;
 
+    $inode || defined $path or croak "no path or inode provided";
+
     unless ($inode) {
 	$inode  = $self->path2inode($path);
 	$self->_isdir($inode) and croak "$path is a directory";
@@ -1164,11 +1166,12 @@ sub write {
     my $self = shift;
     my ($path,$data,$offset,$inode) = @_;
 
+    $inode || defined $path or croak "no path or inode provided";
+
     unless ($inode) {
 	$inode  = $self->path2inode($path);
 	$self->_isdir($inode) and croak "$path is a directory";
     }
-
     $offset  ||= 0;
 
     my $blksize        = $self->blocksize;
@@ -1421,7 +1424,7 @@ These constants can be obtained from the POSIX module.
 sub access {
     my $self = shift;
     my ($path,$access_mode) = @_;
-    my $inode = $Self->path2inode($path);
+    my $inode = $self->path2inode($path);
     return $self->check_perm($inode,$access_mode);
 }
 
@@ -2005,13 +2008,18 @@ sub check_perm {
 	= $dbh->selectrow_array("select $fff&mode,uid,gid from metadata where inode=$inode");
 
     my $groups      = $self->get_groups($uid,$gid);
+    if ($access_mode == F_OK) {
+	die "permission denied" unless $uid==$owner || $groups->{$group};
+	return 1;
+    }
+
     my $perm_word   = $uid==$owner      ? $mode >> 6
                      :$groups->{$group} ? $mode >> 3
                      :$mode;
     $perm_word     &= 07;
 
     $access_mode==($perm_word & $access_mode) or die "permission denied";
-    return 0;
+    return 1;
 }     
 
 =head2 $fs->touch($inode,$field)
