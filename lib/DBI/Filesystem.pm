@@ -675,7 +675,8 @@ The mode is a bitwise combination of file type and access mode as
 described for the st_mode field in the stat(2) man page. If you
 provide just the access mode (e.g. 0666), then the method will
 automatically set the file type bits to indicate that this is a
-regular file.
+regular file. You must provide the file type in the mode in order to
+create a special file.
 
 The rdev field contains the major and minor device numbers for device
 special files, and is only needed when creating a device special file
@@ -951,11 +952,13 @@ sub chown {
     my $inode             = $self->path2inode($path) ;
 
     # permission checking here
-    my $ctx = $self->get_context;
-    die "permission denied" unless $uid == 0xffffffff || $ctx->{uid} == 0;
+    unless ($self->ignore_permissions) {
+	my $ctx = $self->get_context;
+	die "permission denied" unless $uid == 0xffffffff || $ctx->{uid} == 0;
 
-    my $groups            = $self->get_groups(@{$ctx}{'uid','gid'});
-    die "permission denied" unless $gid == 0xffffffff || $ctx->{uid} == 0 || $groups->{$gid};
+	my $groups            = $self->get_groups(@{$ctx}{'uid','gid'});
+	die "permission denied" unless $gid == 0xffffffff || $ctx->{uid} == 0 || $groups->{$gid};
+    }
 
     my $dbh               = $self->dbh;
     eval {
@@ -969,6 +972,7 @@ sub chown {
 	eval {$dbh->rollback()};
 	die "update aborted due to $@";
     }
+    1;
 }
 
 =head2 $fs->chmod($path,$mode)
@@ -984,6 +988,7 @@ sub chmod {
     my $self         = shift;
     my ($path,$mode) = @_;
     my $inode        = $self->path2inode($path) ;
+    $self->check_perm($inode,W_OK);
     my $dbh          = $self->dbh;
     my $f000         = 0xf000;
     my $now          = $self->_now_sql;
@@ -1805,11 +1810,11 @@ sub create_inode {
     my $self        = shift;
     my ($type,$mode,$rdev,$uid,$gid) = @_;
 
-    $mode  ||= 0777;
-    $mode |=  $type eq 'f' ? 0100000
-             :$type eq 'd' ? 0040000
-             :$type eq 'l' ? 0120000
-             :0000000;  # default
+    $mode ||= 0777; # set filetype unless already set
+    $mode  |=  $type eq 'f'       ? 0100000
+              :$type eq 'd'       ? 0040000
+              :$type eq 'l'       ? 0120000
+              :0000000 unless $mode&0777000;
 
     $uid  ||= 0;
     $gid  ||= 0;
@@ -1976,7 +1981,7 @@ END
 =head2 $fs->check_perm($inode,$access_mode)
 
 Given a file or directory's inode and the access mode (a bitwise OR of
-RD_OK, WR_OK, X_OK), checks whether the current user is allowed
+R_OK, W_OK, X_OK), checks whether the current user is allowed
 access. This will return if access is allowed, or raise a fatal error
 otherwise.
 

@@ -12,7 +12,7 @@ use POSIX qw(ENOENT EISDIR ENOTDIR EINVAL ENOTEMPTY EACCES EIO O_RDONLY);
 use select_dsn;
 
 my @dsn = all_dsn();
-plan tests => 1+ (10 * @dsn);
+plan tests => 1+ (17 * @dsn);
 
 use_ok('DBI::Filesystem');
 
@@ -43,6 +43,22 @@ for my $dsn (@dsn) {
     is($stat[2],0100644,  'file mode set at creation');
     @stat  = $fs->getattr('a');
     is($stat[2],0040755,  'directory mode set at creation');
+    $fs->chmod('a/file1.txt',0600);
+    @stat  = $fs->getattr('a/file1.txt');
+    is($stat[2],0100600,  'file mode can be changed');
+
+    is($stat[4],$<,'uid matches');
+    my ($gid) = $( =~ /^(\d+)/;
+    is($stat[5],$gid,'gid matches');
+    eval {$fs->chown('a/file1.txt',100,100)};
+    like($@,qr/permission denied/,"permission checks forbid ownership change");
+    $fs->ignore_permissions(1);
+
+    ok(eval {$fs->chown('a/file1.txt',100,100)},'permission checks turn off');
+
+    @stat  = $fs->getattr('a/file1.txt');
+    is($stat[4],100,'uid can be changed');
+    is($stat[5],100,'gid can be changed');
 
 }
 
