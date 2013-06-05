@@ -13,6 +13,7 @@ my $build = Module::Build->new(
     configure_requires => { 'Module::Build' => 0 },
     requires          => {
       'Fuse'          => '0.15',
+      'DBI'           => 0,
       'threads'       => 0,
     },
     build_class        => 'Module::Build',
