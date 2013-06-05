@@ -5,17 +5,10 @@ use warnings;
 use base 'DBI::Filesystem';
 use DBD::Pg 'PG_BYTEA';
 
-sub dbh {
-     my $self = shift;
-     my $dsn  = $self->dsn;
-     return $self->{dbh} if $self->{dbh};
-     my $dbh = eval{DBI->connect($dsn,
-				 undef,undef,
-				 {RaiseError=>1,
-				  PrintError=>0,
-				  AutoCommit=>1})} or do {warn $@; croak $@;};
-     $dbh->do('set client_min_messages to WARNING') or croak DBI->errstr;
-     return $self->{dbh} = $dbh;
+# called after database handle is first created to do extra preparation on it
+sub _dbh_init {
+    my ($self,$dbh) = @_;
+    $dbh->do('set client_min_messages to WARNING');
 }
 
 sub _metadata_table_def {

@@ -7,17 +7,11 @@ use base 'DBI::Filesystem';
 #sub blocksize   { return 16384 }
 sub flushblocks { return   256 }
 
-sub dbh {
-     my $self = shift;
-     my $dsn  = $self->dsn;
-     return $self->{dbh} if $self->{dbh};
-     my $dbh = eval {DBI->connect($dsn,
-				  undef,undef,
-				  {RaiseError=>1,
-				   PrintError=>0,
-				   AutoCommit=>1})} or do {warn $@; croak $@};
-     $dbh->do('PRAGMA synchronous = OFF') or die $dbh->errstr;
-     return $self->{dbh} = $dbh;
+# called after database handle is first created to do extra preparation on it
+sub _dbh_init {
+    my $self = shift;
+    my $dbh = shift;
+    $dbh->do('PRAGMA synchronous = OFF');
 }
 
 sub _metadata_table_def {

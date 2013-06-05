@@ -12,7 +12,7 @@ use POSIX qw(ENOENT EISDIR ENOTDIR EINVAL ENOTEMPTY EACCES EIO O_RDONLY);
 use select_dsn;
 
 my @dsn = all_dsn();
-plan tests => 1+ (42 * @dsn);
+plan tests => 1+ (49 * @dsn);
 
 use_ok('DBI::Filesystem');
 
@@ -95,6 +95,12 @@ for my $dsn (@dsn) {
     eval{$fs->getattr('a/1/file2.txt')};
     like($@,qr/not found/,'linked path gone');
 
+    eval {$fs->rmdir('b/2')};
+    like($@,qr/not empty/,"can't unlink populated directory");
+    ok($fs->rmdir('b/2/i'), 'remove empty directory 1');
+    ok($fs->rmdir('b/2/ii'),'remove empty directory 2');
+    ok($fs->rmdir('b/2'),   'remove empty directory 3');
+
     my $inode = $fs->open('a/1/file1.txt',O_RDONLY);
     @stat1    = $fs->getattr('a/1/file1.txt');
     @stat2    = $fs->fgetattr('a/1/file1.txt',$inode);
@@ -110,6 +116,12 @@ for my $dsn (@dsn) {
 
     eval {$fs->fgetattr('a/1/file1.txt',$inode)};
     like($@,qr/not found/,'fgetattr raises exception after unlinked file is released');
+
+    ok($fs->symlink('b','c'),'symlink create');
+    is($fs->readlink('c'),'b','symlink read');
+
+    eval{$fs->symlink('a','c')};
+    like($@,qr{file exists},'cannot create symlink if path already exists');
 }
 
 

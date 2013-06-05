@@ -55,10 +55,10 @@ DBI::Filesystem - Store a filesystem in a relational database
    $fs->rename('/dir1'=>'/dir2');
 
    # create a symbolic link
-   $fs->create_symlink('/dir2' => '/dir1');
+   $fs->symlink('/dir2' => '/dir1');
 
    # create a hard link
-   $fs->create_hardlink('/dir2/subdir_1a/test.txt' => '/dir2/hardlink.txt');
+   $fs->link('/dir2/subdir_1a/test.txt' => '/dir2/hardlink.txt');
 
    # read symbolic link
    my $target = $fs->read_symlink('/dir1/symlink.txt');
@@ -497,7 +497,7 @@ sub e_mkdir {
     my $path = fixup(shift);
     my $mode = shift;
 
-    $mode   |= 0040000;
+    $mode             |= 0040000;
     my $ctx            = $Self->get_context();
     my $umask          = $ctx->{umask};
     eval {$Self->mkdir($path,$mode&(~$umask))};
@@ -694,6 +694,9 @@ checking, set ignore_permissions() to a true value:
 
  $fs->ignore_permissions(1)
 
+Unless explicitly provided, the mode will be set to 0100777 (all
+permissions set).
+
 =cut
 
 sub mknod { 
@@ -713,7 +716,11 @@ Create a new directory with the specified path and mode and return the
 inode of the newly created directory. The path and mode are the same
 as those described for mknod(), except that the filetype bits for
 $mode will be set to those for a directory if not provided. Like
-mknod() this method may raise a fatal error, which should be trapped by an eval{}.
+mknod() this method may raise a fatal error, which should be trapped
+by an eval{}.
+
+Unless explicitly provided, the mode will be set to 0040777 (all
+permissions set).
 
 =cut
 
@@ -811,6 +818,7 @@ sub rmdir {
 	eval {$dbh->rollback()};
 	die "update aborted due to $@";
     }
+    1;
 }    
 
 
@@ -832,7 +840,13 @@ sub link {
     $self->check_perm(scalar $self->path2inode($self->_dirname($newpath)),W_OK);
     my $inode  = $self->path2inode($oldpath);
     $self->_isdir($inode) and die "hard links of directories not allowed";
-    $self->create_path($inode,$newpath);
+    eval {
+	$self->create_path($inode,$newpath);
+    };
+    if ($@) {
+	die "file exists" if $@ =~ /not unique|duplicate/i;
+	die $@;
+    }
     1;
 }
 
@@ -847,8 +861,15 @@ symlinks that involve directories.
 sub symlink {
     my $self = shift;
     my ($oldpath,$newpath) = @_;
-    my $newnode= $self->create_inode_and_path($newpath,'l',0120777);
-    $self->write($newpath,$oldpath);
+    eval {
+	my $newnode = $self->create_inode_and_path($newpath,'l',0120777);
+	$self->write($newpath,$oldpath);
+    };
+    if ($@) {
+	die "file exists" if $@ =~ /not unique|duplicate/i;
+	die $@;
+    }
+    1;
 }
 
 =head2 $path = $fs->readlink($path)
@@ -1752,11 +1773,14 @@ database handle created per thread.
 sub dbh {
     my $self = shift;
     my $dsn  = $self->dsn;
-    return $self->{dbh} ||= eval {DBI->connect($dsn,
-					       undef,undef,
-					       {RaiseError=>1,
-						PrintError=>0,
-						AutoCommit=>1})} || do {warn $@; croak $@;};
+    return $self->{dbh} if $self->{dbh};
+    my $dbh = DBI->connect($dsn,
+			   undef,undef,
+			   {RaiseError=>1,
+			    PrintError=>0,
+			    AutoCommit=>1}) or die DBI->errstr;
+    $self->_dbh_init($dbh) if $self->can('_dbh_init');
+    return $self->{dbh}=$dbh;
 }
 
 =head2 $inode = $fs->create_inode($type,$mode,$rdev,$uid,$gid)
@@ -1781,13 +1805,11 @@ sub create_inode {
     my $self        = shift;
     my ($type,$mode,$rdev,$uid,$gid) = @_;
 
-    unless (defined $mode) {
-	$mode  = 0777 ;
-	$mode |=  $type eq 'f' ? 0100000
-	         :$type eq 'd' ? 0040000
-	         :$type eq 'l' ? 0120000
-	         :0000000;  # default
-    }
+    $mode  ||= 0777;
+    $mode |=  $type eq 'f' ? 0100000
+             :$type eq 'd' ? 0040000
+             :$type eq 'l' ? 0120000
+             :0000000;  # default
 
     $uid  ||= 0;
     $gid  ||= 0;
