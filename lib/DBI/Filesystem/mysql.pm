@@ -26,7 +26,7 @@ create table path (
     parent       int(10),
     name         varchar(255) not null,
     inode        int(10)      not null,
-    index path (parent,name)
+    unique index ipath (parent,name)
 ) ENGINE=INNODB
 END
 }

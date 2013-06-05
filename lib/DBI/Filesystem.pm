@@ -331,7 +331,7 @@ sub mount {
 
     $fuse_opts ||= {};
 
-    my %mt_opts = map {$_=>1} split ',',$fuse_opts->{mountopts};
+    my %mt_opts = map {$_=>1} split ',',($fuse_opts->{mountopts}||'');
     $mt_opts{hard_remove}++ unless $mt_opts{nohard_remove};
     delete $mt_opts{nohard_remove};
     $fuse_opts->{mountopts} = join ',',keys %mt_opts;
@@ -601,10 +601,7 @@ sub e_access {
 
 sub e_rename {
     my ($oldname,$newname) = @_;
-    eval { 
-	$Self->link($oldname,$newname);
-	$Self->unlink($oldname);
-    };
+    eval { $Self->rename($oldname,$newname) };
     return $Self->errno($@) if $@;
     return 0;
 }
@@ -704,7 +701,7 @@ sub mknod {
     my ($path,$mode,$rdev) = @_;
     my $result = eval {$self->create_inode_and_path($path,'f',$mode,$rdev)};
     if ($@) {
-	die "file exists" if $@ =~ /not unique/;
+	die "file exists" if $@ =~ /not unique|duplicate/i;
 	die $@;
     }
     return $result;
@@ -724,6 +721,20 @@ sub mkdir {
     my $self = shift;
     my ($path,$mode) = @_;
     $self->create_inode_and_path($path,'d',$mode);
+}
+
+=head2 $fs->rename($oldname,$newname)
+
+Rename a file or directory. Raises a fatal exception if unsuccessful.
+
+=cut
+
+sub rename {
+    my $self = shift;
+    my ($oldname,$newname) = @_;
+    $self->link($oldname,$newname);
+    $self->unlink($oldname);
+    1;
 }
 
 =head2 $fs->unlink($path)
@@ -764,6 +775,7 @@ sub unlink {
 	die "unlink failed due to $@";
     }
     $self->unlink_inode($inode);
+    1;
 }
 
 =head2 $fs->rmdir($path)
@@ -819,7 +831,9 @@ sub link {
     $self->check_perm(scalar $self->path2inode($self->_dirname($oldpath)),W_OK);
     $self->check_perm(scalar $self->path2inode($self->_dirname($newpath)),W_OK);
     my $inode  = $self->path2inode($oldpath);
+    $self->_isdir($inode) and die "hard links of directories not allowed";
     $self->create_path($inode,$newpath);
+    1;
 }
 
 =head2 $fs->symlink($oldpath,$newpath)
@@ -987,7 +1001,7 @@ sub fgetattr {
     my $dbh          = $self->dbh;
     my ($ino,$mode,$uid,$gid,$rdev,$nlinks,$ctime,$mtime,$atime,$size) =
 	$dbh->selectrow_array($self->_fgetattr_sql($inode));
-    $ino or die $dbh->errstr;
+    $ino or die 'not found';
 
     # make sure write buffer contributes
     if (my $blocks = $Blockbuff{$inode}) {
@@ -1434,6 +1448,7 @@ sub errno {
     return -ENOENT()    if $message =~ /not found/;
     return -EEXIST()    if $message =~ /file exists/;
     return -EISDIR()    if $message =~ /is a directory/;
+    return -EPERM()     if $message =~ /hard links of directories not allowed/;
     return -ENOTDIR()   if $message =~ /not a directory/;
     return -EINVAL()    if $message =~ /length beyond end of file/;
     return -ENOTEMPTY() if $message =~ /not empty/;
@@ -1631,6 +1646,9 @@ sub initialize_schema {
     $dbh->do('drop table if exists metadata') or croak $dbh->errstr;
     $dbh->do('drop table if exists path')     or croak $dbh->errstr;
     $dbh->do('drop table if exists extents')  or croak $dbh->errstr;
+    eval{$dbh->do('drop index if exists iblock')};
+    eval{$dbh->do('drop index if exists ipath')};
+
     
     $dbh->do($_) foreach split ';',$self->_metadata_table_def;
     $dbh->do($_) foreach split ';',$self->_path_table_def;
@@ -1643,7 +1661,8 @@ sub initialize_schema {
     my $uid = $ctx->{uid};
     my $gid = $ctx->{gid};
     my $timestamp = $self->_now_sql();
-    $dbh->do("insert into metadata (inode,mode,uid,gid,links,mtime,ctime,atime) values (1,$mode,$uid,$gid,2,$timestamp,$timestamp,$timestamp)") 
+    # bug: we assume that sequence begins with 1
+    $dbh->do("insert into metadata (mode,uid,gid,links,mtime,ctime,atime) values ($mode,$uid,$gid,2,$timestamp,$timestamp,$timestamp)") 
 	or croak $dbh->errstr;
     $dbh->do("insert into path (inode,name,parent) values (1,'/',null)")
 	or croak $dbh->errstr;
@@ -1736,6 +1755,7 @@ sub dbh {
     return $self->{dbh} ||= eval {DBI->connect($dsn,
 					       undef,undef,
 					       {RaiseError=>1,
+						PrintError=>0,
 						AutoCommit=>1})} || do {warn $@; croak $@;};
 }
 

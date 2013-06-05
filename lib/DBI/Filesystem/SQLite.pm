@@ -14,6 +14,7 @@ sub dbh {
      my $dbh = eval {DBI->connect($dsn,
 				  undef,undef,
 				  {RaiseError=>1,
+				   PrintError=>0,
 				   AutoCommit=>1})} or do {warn $@; croak $@};
      $dbh->do('PRAGMA synchronous = OFF') or die $dbh->errstr;
      return $self->{dbh} = $dbh;

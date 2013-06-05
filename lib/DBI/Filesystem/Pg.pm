@@ -12,6 +12,7 @@ sub dbh {
      my $dbh = eval{DBI->connect($dsn,
 				 undef,undef,
 				 {RaiseError=>1,
+				  PrintError=>0,
 				  AutoCommit=>1})} or do {warn $@; croak $@;};
      $dbh->do('set client_min_messages to WARNING') or croak DBI->errstr;
      return $self->{dbh} = $dbh;

@@ -8,7 +8,7 @@ use DBI::Filesystem;
 my $dsn = shift || 'dbi:SQLite:/home/lstein/projects/sqlfs-perl/sqlite.sql';
 my $mnt = shift || "$Bin/../foo";
 
-my $fs = DBI::Filesystem->new($dsn,'create');
+my $fs = DBI::Filesystem->new($dsn,{initialize=>1});
 #my $fs = DBI::Filesystem->new($dsn);
 $fs->mount($mnt);
 
