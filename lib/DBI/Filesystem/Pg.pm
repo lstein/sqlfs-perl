@@ -5,6 +5,11 @@ use warnings;
 use base 'DBI::Filesystem';
 use DBD::Pg 'PG_BYTEA';
 
+# this provides a DSN used during automatic testing by ./Build test
+sub test_dsn {
+    return "dbi:Pg:dbname=postgres";
+}
+
 # called after database handle is first created to do extra preparation on it
 sub _dbh_init {
     my ($self,$dbh) = @_;

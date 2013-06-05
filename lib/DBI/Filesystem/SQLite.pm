@@ -3,6 +3,15 @@ package DBI::Filesystem::SQLite;
 use strict;
 use warnings;
 use base 'DBI::Filesystem';
+use File::Temp;
+
+# this method provides a DSN used by ./Build test
+sub test_dsn {
+    my $self = shift;
+    our $tmpdir  = File::Temp->newdir();
+    my $testfile = "$tmpdir/filesystem.sql";
+    my $dsn      = "dbi:SQLite:dbname=$testfile";
+}
 
 #sub blocksize   { return 16384 }
 sub flushblocks { return   256 }

@@ -2,6 +2,11 @@ package DBI::Filesystem::mysql;
 
 use base 'DBI::Filesystem';
 
+# this provides a DSN used during automatic testing by ./Build test
+sub test_dsn {
+    return "dbi:mysql:dbname=test;user=anonymous";
+}
+
 sub _metadata_table_def {
     return <<END;
 create table metadata (
