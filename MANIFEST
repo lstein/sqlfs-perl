@@ -1,8 +1,16 @@
 bin/sqlfs.pl
 Build.PL
+Changes
 lib/DBI/Filesystem.pm
 lib/DBI/Filesystem/mysql.pm
 lib/DBI/Filesystem/Pg.pm
 lib/DBI/Filesystem/SQLite.pm
 MANIFEST			This list of files
 README.md
+t/01.base.t
+t/02.nodes.t
+t/03.modes.t
+t/04.permissions.t
+t/05.extents.t
+t/06.fuse.t
+t/select_dsn.pm

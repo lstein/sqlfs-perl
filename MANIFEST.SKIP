@@ -73,4 +73,10 @@
 \bsqlfs-perl-[\d\.\_]+
 
 ^tests/
+.sql$
+^schema
+^foo
+^filesystem
+
+
 
