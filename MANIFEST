@@ -14,3 +14,5 @@ t/04.permissions.t
 t/05.extents.t
 t/06.fuse.t
 t/select_dsn.pm
+META.yml
+META.json

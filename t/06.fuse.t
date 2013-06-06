@@ -94,6 +94,7 @@ exit 0;
 END {
     system "fusermount -u $mtpt 2>/dev/null" if $mtpt;
     kill TERM=>$pid if $pid;
+    waitpid($pid,0) if $pid;
 }
 
 sub wait_for_mount {
