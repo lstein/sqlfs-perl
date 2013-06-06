@@ -17,7 +17,7 @@ $SIG{INT}=$SIG{TERM}=sub {exit 0 };
 my ($child,$pid,$mtpt);
 
 my @dsn = all_dsn();
-plan tests => 1+ (4 * @dsn);
+plan tests => 1+ (13 * @dsn);
 
 use_ok('DBI::Filesystem');
 for my $dsn (@dsn) {
@@ -45,7 +45,26 @@ for my $dsn (@dsn) {
     ok(-d "$mtpt/dir1",'directory exists');
     my @stat = stat("$mtpt/dir1");
     is($stat[2],040775,'stat correct');
-}
+
+    ok(open(my $fh,'>',"$mtpt/dir1/test.txt"),'open for write ok');
+    ok(print($fh "now is the time"),'print ok');
+    ok(close($fh),'close ok');
+    ok(open($fh,'<'."$mtpt/dir1/test.txt"),'open for read ok');
+    my $data = <$fh>;
+    is($data,'now is the time','read ok');
+    close $fh;
+
+    @stat = stat("$mtpt/dir1/test.txt");
+    is($stat[7],length('now is the time'),'length ok');
+
+    open($fh,'<'."$mtpt/dir1/test.txt");
+    ok(unlink("$mtpt/dir1/test.txt"),'unlink ok');
+    ok(!-e "$mtpt/dir1/test.txt",'path removed');
+    $data = <$fh>;
+    is($data,'now is the time','read on unlinked file ok');
+    close $fh;
+}    
+
 
 exit 0;
 
