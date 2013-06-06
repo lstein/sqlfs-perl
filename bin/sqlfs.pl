@@ -16,11 +16,11 @@ Options:
   --foreground                  remain in foreground (false)
   --nothreads                   disable threads (false)
   --debug                       enable Fuse debugging messages
-  --module=DBI::Filesystem::... Use a subclass of DBI::Filesystem
+  --module=<ModuleName>         Use a subclass of DBI::Filesystem
 
   --option=allow_other          allow other accounts to access filesystem (false)
   --option=default_permissions  enable permission checking by kernel (false)
-  --option=fsname=name          set filesystem name (none)
+  --option=fsname=<name>        set filesystem name (none)
   --option=use_ino              let filesystem set inode numbers (false)
   --option=direct_io            disable page cache (false)
   --option=nonempty             allow mounts over non-empty file/dir (false)

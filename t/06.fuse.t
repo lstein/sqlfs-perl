@@ -17,7 +17,7 @@ $SIG{INT}=$SIG{TERM}=sub {exit 0 };
 my ($child,$pid,$mtpt);
 
 my @dsn = all_dsn();
-plan tests => 1+ (13 * @dsn);
+plan tests => 1+ (22 * @dsn);
 
 use_ok('DBI::Filesystem');
 for my $dsn (@dsn) {
@@ -46,7 +46,18 @@ for my $dsn (@dsn) {
     my @stat = stat("$mtpt/dir1");
     is($stat[2],040775,'stat correct');
 
-    ok(open(my $fh,'>',"$mtpt/dir1/test.txt"),'open for write ok');
+    my $fh;
+
+    open($fh,'>',"$mtpt/dir1");
+    is($!,'Is a directory');
+    close $fh;
+
+    ok(!mkdir("$mtpt/.."),'refuse to create .. directory');
+    is($!,'File exists','create duplicate directory blocked');
+    ok(!rmdir("$mtpt/.."),'refuse to remove .. directory');
+    is($!,'Directory not empty','remove .. directory blocked');
+
+    ok(open($fh,'>',"$mtpt/dir1/test.txt"),'open for write ok');
     ok(print($fh "now is the time"),'print ok');
     ok(close($fh),'close ok');
     ok(open($fh,'<'."$mtpt/dir1/test.txt"),'open for read ok');
@@ -57,12 +68,24 @@ for my $dsn (@dsn) {
     @stat = stat("$mtpt/dir1/test.txt");
     is($stat[7],length('now is the time'),'length ok');
 
+    chmod(0200,"$mtpt/dir1/test.txt"); # write only
+    ok(open($fh,'>',"$mtpt/dir1/test.txt"),'can open write-only file for writing');
+    print $fh 'this is a test';
+    close $fh;
+    ok(!open($fh,'<',"$mtpt/dir1/test.txt"),"can't open write-only file for reading");
+    chmod(0600,"$mtpt/dir1/test.txt"); # read/write
+    ok(open($fh,'<',"$mtpt/dir1/test.txt"),"can open read/write file for reading");
+    $data = <$fh>;
+    is($data,'this is a test','contents match');
+    close $fh;
+
     open($fh,'<'."$mtpt/dir1/test.txt");
     ok(unlink("$mtpt/dir1/test.txt"),'unlink ok');
     ok(!-e "$mtpt/dir1/test.txt",'path removed');
     $data = <$fh>;
-    is($data,'now is the time','read on unlinked file ok');
+    is($data,'this is a test','read on unlinked file ok');
     close $fh;
+
 }    
 
 
