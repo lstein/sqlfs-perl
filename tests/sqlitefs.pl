@@ -10,6 +10,6 @@ my $mnt = shift || "$Bin/../foo";
 
 my $fs = DBI::Filesystem->new($dsn,{initialize=>1});
 #my $fs = DBI::Filesystem->new($dsn);
-$fs->mount($mnt);
+$fs->mount($mnt,{mountopts=>'fsname=sqlfs'});
 
 exit 0;
