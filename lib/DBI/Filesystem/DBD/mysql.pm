@@ -1,4 +1,4 @@
-package DBI::Filesystem::mysql;
+package DBI::Filesystem::DBD::mysql;
 
 use base 'DBI::Filesystem';
 

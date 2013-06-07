@@ -1,4 +1,4 @@
-package DBI::Filesystem::SQLite;
+package DBI::Filesystem::DBD::SQLite;
 
 use strict;
 use warnings;

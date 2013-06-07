@@ -228,7 +228,7 @@ sub new {
     # load the appropriate DBD subclass and fix up its @ISA so that we become
     # the parent class
     my $c        = ref $class||$class;
-    my $subclass = __PACKAGE__.'::'.$dbd;
+    my $subclass = __PACKAGE__.'::DBD::'.$dbd;
     eval "require $subclass;1" or croak $@  unless $subclass->can('new');
     eval "unshift \@$subclass\:\:ISA,'$c'   unless \$subclass->isa('$c')";
     die $@ if $@;

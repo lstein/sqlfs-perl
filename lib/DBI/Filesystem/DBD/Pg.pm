@@ -1,4 +1,4 @@
-package DBI::Filesystem::Pg;
+package DBI::Filesystem::DBD::Pg;
 
 use strict;
 use warnings;

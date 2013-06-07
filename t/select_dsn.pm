@@ -12,10 +12,10 @@ sub all_dsn {
     my @result;
 
     my %drivers = map {$_=>1} DBI->available_drivers;
-    my $base = "$Bin/../lib/DBI/Filesystem";
+    my $base = "$Bin/../lib/DBI/Filesystem/DBD";
     foreach (keys %drivers) {
 	next unless eval {require "$base/${_}.pm"};
-	my $class    = 'DBI::Filesystem::'.$_;
+	my $class    = 'DBI::Filesystem::DBD::'.$_;
 	my $dsn      = eval{$class->test_dsn} or next;
 	my $dbh      = DBI->connect($dsn,undef,undef,{PrintError=>0}) or next;
 	push @result,$dsn;
