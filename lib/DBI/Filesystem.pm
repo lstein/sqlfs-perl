@@ -900,18 +900,38 @@ permission denied error if not (trap this with an eval{}).
 sub getdir {
     my $self = shift;
     my $path = shift;
+
     my $inode = $self->path2inode($path);
     $self->_isdir($inode) or croak "not directory";
     $self->check_perm($inode,X_OK|R_OK);
-    return $self->_getdir($inode);
+    return $self->_getdir($inode,$path);
 }
 
 sub _getdir {
     my $self  = shift;
-    my $inode = shift;
+    my ($inode,$path) = @_;
+
+    return $self->_sql_directory($path) if $path =~ /^%where/;
+
     my $dbh   = $self->dbh;
     my $col   = $dbh->selectcol_arrayref("select name from path where parent=$inode");
     return '.','..',@$col;
+}
+
+# user has passed a SQL WHERE clause as a directory name
+sub _sql_directory {
+    my $self = shift;
+    my $path = shift;
+    (my $where = $path) =~ s/^%(?:where)?//;
+    my $dbh    = $self->dbh;
+    my $names  = eval {$dbh->selectcol_arrayref("select name from metadata,path where metadata.inode=path.inode and $where")};
+    if ($@) {
+	my $msg = $@;
+	$msg   =~ s/\s+at.+$//;
+	$msg =~ s![\n/] !!g;
+	return ('.','..',$msg);
+    } 
+    return ('.','..',@$names);
 }
 
 =head2 $boolean = $fs->isdir($path)
@@ -1023,8 +1043,8 @@ The returned list will contain:
 sub fgetattr {
     my $self  = shift;
     my ($path,$inode) = @_;
-    $inode ||= $self->path2inode;
-    my $dbh          = $self->dbh;
+    $inode  ||= $self->path2inode($path);
+    my $dbh   = $self->dbh;
     my ($ino,$mode,$uid,$gid,$rdev,$nlinks,$ctime,$mtime,$atime,$size) =
 	$dbh->selectrow_array($self->_fgetattr_sql($inode));
     $ino or die 'not found';
@@ -2062,11 +2082,34 @@ passing an invalid path will return a "path not found" error.
 sub path2inode {
     my $self   = shift;
     my $path   = shift;
-    my ($inode,$p_inode,$name) = $self->_path2inode($path);
+
+    my ($inode,$p_inode,$name) = $path =~ m!^%where.+/! 
+	                           ? $self->_sql2inode($path)
+                                   : $self->_path2inode($path);
 
     my $ctx = $self->get_context;
     $self->check_path($self->_dirname($path),$p_inode,@{$ctx}{'uid','gid'}) or die "permission denied";
     return wantarray ? ($inode,$p_inode,$name) : $inode;
+}
+
+sub _sql2inode {
+    my $self = shift;
+    my $path = shift;
+
+    my $basename = basename($path);
+    my $dirname  = $self->_dirname($path);
+    (my $where = $dirname) =~ s/^%(?:where)?//;
+
+    my ($inode,$parent);
+    my $dbh    = $self->dbh;
+    eval {
+	my $sth    = $dbh->prepare_cached("select p.inode,p.parent from metadata as m,path as p where p.name=? and m.inode=p.inode and $where");
+	$sth->execute($basename);
+	($inode,$parent) = $sth->fetchrow_array(); # only one hit allowed!
+	$sth->finish();
+    };
+
+    return ($inode,$parent,$basename);
 }
 
 sub _path2inode {
