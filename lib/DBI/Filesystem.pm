@@ -1666,6 +1666,11 @@ a hole are shorter than the full block length.
 The logical length of the file is stored in the metadata length
 column.
 
+If you have subclassed DBI::Filesystem and wish to adjust the default
+schema (such as adding indexes), this is the place to do it. Simply
+call the inherited initialize_schema(), and then alter the tables as
+you please.
+
 =cut
 
 sub initialize_schema {
@@ -2234,6 +2239,14 @@ sub _create_inode_sql {
 
 1;
 
+=head1 SUBCLASSING
+
+Subclass this module as you ordinarily would by creating a new package
+that has a "use base DBI::Filesystem". You can then tell the
+command-line sqlfs.pl tool to load your subclass rather than the
+original by providing a --module (or -M) option, as in:
+
+ $ sqlfs.pl -MDBI::Filesystem::MyClass <database> <mtpt>
 
 =head1 AUTHOR
 

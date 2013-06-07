@@ -1,2 +1,6 @@
+Version 1.01 Fri Jun  7 13:21:43 EDT 2013
+    - Add usage data to README.
+    - Incorporate benchmarking data into README.
+
 Version 1.00 Thu Jun  6 16:22:34 EDT 2013
     - Initial CPAN release

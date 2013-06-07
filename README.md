@@ -147,35 +147,29 @@ More information can be obtained by passing the sqlfs.pl command the
 System Performance
 ==================
 
-You can expect write performance roughly 10-fold slower than a local
-ext3 filesystem and roughly half the speed of an NFS filesystem
-mounted on a gigabit LAN. Read performance is roughly 
+Depending on the SQL storage engine, you can expect write performance
+roughly 10-fold slower than on a local ext3 filesystem and roughly a
+third the speed of a NFSv4 filesystem mounted across a gigabit
+LAN. Read performance various considerably from storage engine to
+storage engine, but even the slowest storage engine provides
+sufficient bandwith to stream an HD movie. The MySQL engine appears to
+be faster than ext3 for reading, which is puzzling since MySQL's
+database files are on the same ext3 filesystem.
 
- * ext3 write/read
+                Local ext3  NFSv4    SQLite     PostgreSQL    MySQL
+                ----------  -----    ------     ----------    -----
+Read  (MB/s)      78.4      60.5     12.6         35.9        98.6
+Write (MB/s)     189.0      45.1     12.5          7.5        12.7
 
- $ sync; dd if=~/build/linux_3.2.0.orig.tar.gz of=~/linux.tar.gz bs=4096
- 24077+1 records in
- 24077+1 records out
- 98621205 bytes (99 MB) copied, 0.627663 s, 157 MB/s
-
- $ sudo /bin/sh -c 'echo 3 > /proc/sys/vm/drop_caches'
- $ sync; dd if=~/linux.tar.gz of=/dev/null bs=4096
- 24077+1 records in
- 24077+1 records out
- 98621205 bytes (99 MB) copied, 1.60981 s, 61.3 MB/s
-
- * SQLite benchmarking:
-
- $ sync; dd if=~/build/linux_3.2.0.orig.tar.gz of=/tmp/sqlfs/linux.tar.gz bs=4096
- 24077+1 records in
- 24077+1 records out
- 98621205 bytes (99 MB) copied, 7.39544 s, 13.3 MB/s
-
- $ sudo /bin/sh -c 'echo 3 > /proc/sys/vm/drop_caches'
- $ sync; dd if=/tmp/sqlfs/linux.tar.gz of=/dev/null bs=4096
- 24077+1 records in
- 24077+1 records out
- 98621205 bytes (99 MB) copied, 6.66609 s, 14.8 MB/s
+(These benchmarks were performed on a commodity intel i3 laptop @ 2.60
+GHz, using a SATA II internal hard disk. The write test consisted of
+copying a 99 MB binary file (a .tar.gz of a linux kernel) from a
+RAM-based tmpfs to the target filesystem using dd and a blocksize of
+4096. The read test consisted of copying the file back from the
+filesystem into /dev/null. The filesystem was synced and kernel caches
+were emptied prior to each test. Each test was run 5 times and the
+median value calculated. The benchmark script can be found in the
+github repository for this module, under tests/benchmark.pl).
 
 Author and License Information
 ==============================
