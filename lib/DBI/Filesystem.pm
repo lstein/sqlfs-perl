@@ -740,8 +740,14 @@ Rename a file or directory. Raises a fatal exception if unsuccessful.
 sub rename {
     my $self = shift;
     my ($oldname,$newname) = @_;
-    $self->link($oldname,$newname);
-    $self->unlink($oldname);
+    my $inode = $self->path2inode($oldname);
+
+    $self->link($oldname,$newname,'allow directory unlinking');
+    if ($self->_isdir($inode)) {
+	$self->rmdir($oldname);
+    } else {
+	$self->unlink($oldname);
+    }
     1;
 }
 
@@ -836,11 +842,12 @@ filesystem with path loops.
 
 sub link {
     my $self = shift;
-    my ($oldpath,$newpath) = @_;
+    my ($oldpath,$newpath,$allow_dir_unlink) = @_;
     $self->check_perm(scalar $self->path2inode($self->_dirname($oldpath)),W_OK);
     $self->check_perm(scalar $self->path2inode($self->_dirname($newpath)),W_OK);
     my $inode  = $self->path2inode($oldpath);
-    $self->_isdir($inode) and die "hard links of directories not allowed";
+    $self->_isdir($inode) && !$allow_dir_unlink
+	and die "hard links of directories not allowed";
     eval {
 	$self->create_path($inode,$newpath);
     };
