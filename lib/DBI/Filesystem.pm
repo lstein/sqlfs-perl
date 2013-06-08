@@ -740,9 +740,29 @@ Rename a file or directory. Raises a fatal exception if unsuccessful.
 sub rename {
     my $self = shift;
     my ($oldname,$newname) = @_;
-    $self->link($oldname,$newname);
-    $self->unlink($oldname);
+
+    my ($inode,$parent,$basename) = $self->path2inode($oldname);
+
+    # if newname exists then this is an error
+    die "file exists" if eval{$self->path2inode($newname)};
+
+    my $newbase   = basename($newname);
+    my $newdir    = $self->_dirname($newname);
+    my $newparent = $self->path2inode($newdir); # also does path checking
+    $self->check_perm($newparent,W_OK);         # can we update the new parent?
+
+    my $dbh = $self->dbh;
+    my $sth = $dbh->prepare_cached(
+	'update path set name=?,parent=? where inode=? and parent=? and name=?');
+    $sth->execute($newbase,$newparent,$inode,$parent,$basename);
+    $sth->finish;
     1;
+
+# although this seemed to make sense at the time, 
+# it is NOT the right way to do it, as it fails on directories!
+#    $self->link($oldname,$newname);
+#    $self->unlink($oldname);
+#    1;
 }
 
 =head2 $fs->unlink($path)
