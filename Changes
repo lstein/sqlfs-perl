@@ -1,3 +1,7 @@
+Version 1.02
+   - Fix broken rename() method, which previously wasn't able
+     to rename directories.
+
 Version 1.01 Fri Jun  7 13:21:43 EDT 2013
     - Add usage data to README.
     - Incorporate benchmarking data into README.

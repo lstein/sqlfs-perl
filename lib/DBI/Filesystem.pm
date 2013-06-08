@@ -749,12 +749,13 @@ sub rename {
     my $newbase   = basename($newname);
     my $newdir    = $self->_dirname($newname);
     my $newparent = $self->path2inode($newdir); # also does path checking
+    $self->check_perm($parent,W_OK);            # can we update the old parent?
     $self->check_perm($newparent,W_OK);         # can we update the new parent?
 
     my $dbh = $self->dbh;
     my $sth = $dbh->prepare_cached(
-	'update path set name=?,parent=? where inode=? and parent=? and name=?');
-    $sth->execute($newbase,$newparent,$inode,$parent,$basename);
+	'update path set name=?,parent=? where parent=? and name=?');
+    $sth->execute($newbase,$newparent,$parent,$basename);
     $sth->finish;
     1;
 
