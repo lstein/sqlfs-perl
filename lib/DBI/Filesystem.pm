@@ -740,14 +740,22 @@ Rename a file or directory. Raises a fatal exception if unsuccessful.
 sub rename {
     my $self = shift;
     my ($oldname,$newname) = @_;
-    my $inode = $self->path2inode($oldname);
+    my ($inode,$parent,$basename) = $self->path2inode($oldname);
 
-    $self->link($oldname,$newname,'allow directory unlinking');
-    if ($self->_isdir($inode)) {
-	$self->rmdir($oldname);
-    } else {
-	$self->unlink($oldname);
-    }
+    # if newname exists then this is an error
+    die "file exists" if eval{$self->path2inode($newname)};
+
+    my $newbase   = basename($newname);
+    my $newdir    = $self->_dirname($newname);
+    my $newparent = $self->path2inode($newdir); # also does path checking
+    $self->check_perm($parent,W_OK);            # can we update the old parent?
+    $self->check_perm($newparent,W_OK);         # can we update the new parent?
+
+    my $dbh = $self->dbh;
+    my $sth = $dbh->prepare_cached(
+	'update path set name=?,parent=? where parent=? and name=?');
+    $sth->execute($newbase,$newparent,$parent,$basename);
+    $sth->finish;
     1;
 }
 
