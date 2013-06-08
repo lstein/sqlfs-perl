@@ -910,6 +910,25 @@ are also always returned. This method checks that the current user has
 read and execute permissions on the directory, and will raise a
 permission denied error if not (trap this with an eval{}).
 
+Experimental feature: If the directory begins with the magic
+characters "%%" then getdir will look for a dotfile named ".query"
+within the directory. ".query" must contain a SQL query that returns a
+series of one or more inodes. These will be used to populate the
+directory automagically. The query can span multiple lines, and 
+lines that begin with "#" will be ignored. For example:
+
+ # display all files greater than 2 Mb in size
+ select inode from metadata where length>2000000
+
+Another example:
+
+ # all .jpg files created/modified more recently
+ # within the past day (MySQL-specific!)
+ select m.inode from metadata as m,path as p
+     where p.name like '%.jpg'
+       and (now()-interval 1 day) <= m.mtime
+       and m.inode=p.inode
+
 =cut
 
 sub getdir {
@@ -925,11 +944,12 @@ sub getdir {
 sub _getdir {
     my $self  = shift;
     my ($inode,$path) = @_;
-
-    return $self->_sql_directory($path) if $path =~ /^%where/;
-
     my $dbh   = $self->dbh;
     my $col   = $dbh->selectcol_arrayref("select name from path where parent=$inode");
+    if ($self->_is_dynamic_dir($inode,$path)) {
+	my $dynamic = $self->get_dynamic_entries($inode,$path);
+	push @$col,keys %$dynamic if $dynamic;
+    }
     return '.','..',@$col;
 }
 
@@ -947,6 +967,40 @@ sub _sql_directory {
 	return ('.','..',$msg);
     } 
     return ('.','..',@$names);
+}
+
+sub get_dynamic_entries {
+    my $self = shift;
+    my ($inode,$path) = @_;
+
+    # look for a file named .query
+    my $dbh     = $self->dbh;
+    my ($query_inode) = $dbh->selectrow_array("select inode from path where name='.query' and parent=$inode");
+    return unless $query_inode;
+
+    # fetch the query
+    my $sql   = $self->read(undef,4096,0,$query_inode) or return;
+    $sql =~ s/#.+\n//g;
+
+    # run the query
+    my $isdir = 0x4000;
+    my $query = "select p.inode,p.name,p.parent from path as p,metadata as m where p.inode=m.inode and ($isdir&m.mode)=0 and p.inode in ($sql)";
+    my $sth;
+    eval {
+	$sth   = $dbh->prepare($query);
+	$sth->execute();
+    };
+    warn $@ if $@;
+    return {'SQL_ERROR'=>[0,0,$@]} if $@;
+
+    my (%matches,%seenit);
+    while (my ($inode,$name,$parent)=$sth->fetchrow_array) {
+	next if $self->_is_dynamic_dir($inode,$name); # too weirdly recursive
+	$name .= ' ('.($seenit{$name}-1).')' if $seenit{$name}++;
+	$matches{$name} = [$inode,$parent,undef];
+    }
+    $sth->finish;
+    return \%matches;
 }
 
 =head2 $boolean = $fs->isdir($path)
@@ -972,6 +1026,12 @@ sub _isdir {
     my ($result) = $dbh->selectrow_array("select ($mask&mode)=$isdir from metadata where inode=$inode")
 	or die $dbh->errstr;
     return $result;
+}
+
+sub _is_dynamic_dir {
+    my $self = shift;
+    my ($inode,$path) = @_;
+    return $path =~ m!(?:^|/)%%[^/]+$! && $self->_isdir($inode) 
 }
 
 =head2 $fs->chown($path,$uid,$gid)
@@ -2098,32 +2158,28 @@ sub path2inode {
     my $self   = shift;
     my $path   = shift;
 
-    my ($inode,$p_inode,$name) = $path =~ m!^%where.+/! 
-	                           ? $self->_sql2inode($path)
-                                   : $self->_path2inode($path);
+    my ($inode,$p_inode,$name) ;
+    eval {
+	($inode,$p_inode,$name)  = $self->_path2inode($path);
+    } or
+	($inode,$p_inode,$name) = $self->_dynamic_path2inode($path);
+    croak "$path not found" unless $inode;
 
     my $ctx = $self->get_context;
     $self->check_path($self->_dirname($path),$p_inode,@{$ctx}{'uid','gid'}) or die "permission denied";
     return wantarray ? ($inode,$p_inode,$name) : $inode;
 }
 
-sub _sql2inode {
+sub _dynamic_path2inode {
     my $self = shift;
-    my $path = shift;
-
-    my $basename = basename($path);
-    my $dirname  = $self->_dirname($path);
-    (my $where = $dirname) =~ s/^%(?:where)?//;
-
-    my ($inode,$parent);
-    my $dbh    = $self->dbh;
-    eval {
-	my $sth    = $dbh->prepare_cached("select p.inode,p.parent from metadata as m,path as p where p.name=? and m.inode=p.inode and $where");
-	$sth->execute($basename);
-	($inode,$parent) = $sth->fetchrow_array(); # only one hit allowed!
-	$sth->finish();
-    };
-
+    my $path      = shift;
+    my $dirname   = $self->_dirname($path);
+    my $basename  = basename($path);
+    my $dir_inode = $self->path2inode($dirname)   or return;
+    $self->_is_dynamic_dir($dir_inode,$dirname)   or return;
+    my $entries = $self->get_dynamic_entries($dir_inode,$dirname);
+    $entries->{$basename}                         or return;
+    my ($inode,$parent) = @{$entries->{$basename}};
     return ($inode,$parent,$basename);
 }
 
