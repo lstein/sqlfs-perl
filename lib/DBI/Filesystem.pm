@@ -210,6 +210,9 @@ more of the following keys:
  ignore_permissions  If true, then Unix permission checking is not
                      performed when creating/reading/writing files.
 
+ allow_magic_dirs    If true, allow SQL statements in "magic" directories
+                     to be executed (see below).
+
 WARNING: Initializing the schema quietly destroys anything that might
 have been there before!
 
@@ -254,6 +257,22 @@ sub ignore_permissions {
     my $self = shift;
     my $d    = $self->{ignore_permissions};
     $self->{ignore_permissions} = shift if @_;
+    $d;
+}
+
+=head2 $boolean = $fs->allow_magic_dirs([$boolean]);
+
+Get/set the allow_magic_dirs flag. If true, then directories whose
+names begin with "%%" will be searched for a dotfile named ".query"
+that contains a SQL statement to be run every time a directory listing
+is required from this directory. See getdir() below.
+
+=cut
+
+sub allow_magic_dirs {
+    my $self = shift;
+    my $d    = $self->{allow_magic_dirs};
+    $self->{allow_magic_dirs} = shift if @_;
     $d;
 }
 
@@ -771,7 +790,7 @@ will raise a fatal exception on any errors.
 sub unlink {
     my $self  = shift;
     my $path = shift;
-    my ($inode,$parent,$name)  = $self->path2inode($path) ;
+    my ($inode,$parent,$name)  = $self->_path2inode($path) ;
 
     $parent ||= 1;
     $self->check_perm($parent,W_OK);
@@ -949,7 +968,7 @@ sub _getdir {
     my ($inode,$path) = @_;
     my $dbh   = $self->dbh;
     my $col   = $dbh->selectcol_arrayref("select name from path where parent=$inode");
-    if ($self->_is_dynamic_dir($inode,$path)) {
+    if ($self->allow_magic_dirs && $self->_is_dynamic_dir($inode,$path)) {
 	my $dynamic = $self->get_dynamic_entries($inode,$path);
 	push @$col,keys %$dynamic if $dynamic;
     }
@@ -978,7 +997,8 @@ sub get_dynamic_entries {
 
     # look for a file named .query
     my $dbh     = $self->dbh;
-    my ($query_inode) = $dbh->selectrow_array("select inode from path where name='.query' and parent=$inode");
+    my ($query_inode) = 
+	$dbh->selectrow_array("select inode from path where name='.query' and parent=$inode");
     return unless $query_inode;
 
     # fetch the query
@@ -997,16 +1017,18 @@ sub get_dynamic_entries {
     my $error_file = "$path/SQL_ERROR";
     if ($@) {
 	my $msg = $@;
-	warn $msg;
 	eval {
-	    my $i = $self->path2inode($error_file) ||
-		$self->mknod($error_file,0444,0);
+	    my ($i) = eval {$self->_path2inode($error_file)};
+	    $i    ||= $self->mknod($error_file,0444,0);
+	    $self->ftruncate($error_file,0,$i);
 	    $self->write($error_file,$msg,0,$i);
 	};
 	warn $@ if $@;
 	return;
     } else {
-#	$self->unlink($error_file);
+	eval{
+	    $self->unlink($error_file);
+	};
     }
 
     my (%matches,%seenit);
@@ -2188,9 +2210,10 @@ sub path2inode {
 sub _dynamic_path2inode {
     my $self = shift;
     my $path      = shift;
-    my $dirname   = $self->_dirname($path);
-    my $basename  = basename($path);
-    my $dir_inode = $self->path2inode($dirname)   or return;
+    return unless $self->allow_magic_dirs;
+    my $dirname     = $self->_dirname($path);
+    my $basename    = basename($path);
+    my ($dir_inode) = $self->_path2inode($dirname)   or return;
     $self->_is_dynamic_dir($dir_inode,$dirname)   or return;
     my $entries = $self->get_dynamic_entries($dir_inode,$dirname);
     $entries->{$basename}                         or return;
