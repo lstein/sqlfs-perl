@@ -759,7 +759,8 @@ Rename a file or directory. Raises a fatal exception if unsuccessful.
 sub rename {
     my $self = shift;
     my ($oldname,$newname) = @_;
-    my ($inode,$parent,$basename) = $self->path2inode($oldname);
+    my ($inode,$parent,$basename,$dynamic) = $self->path2inode($oldname);
+    die "permission denied" if $dynamic;
 
     # if newname exists then this is an error
     die "file exists" if eval{$self->path2inode($newname)};
@@ -790,7 +791,8 @@ will raise a fatal exception on any errors.
 sub unlink {
     my $self  = shift;
     my $path = shift;
-    my ($inode,$parent,$name)  = $self->_path2inode($path) ;
+    my ($inode,$parent,$name,$dynamic)  = $self->path2inode($path);
+    die "permission denied" if $dynamic;
 
     $parent ||= 1;
     $self->check_perm($parent,W_OK);
@@ -1027,14 +1029,15 @@ sub get_dynamic_entries {
 	return;
     } else {
 	eval{
-	    $self->unlink($error_file);
+	    $self->unlink($error_file) if $self->_path2inode($error_file);
 	};
     }
 
     my (%matches,%seenit);
-    while (my ($inode,$name,$parent)=$sth->fetchrow_array) {
+    while (my ($file_inode,$name,$parent)=$sth->fetchrow_array) {
+	next if $parent==$inode; # don't self-reference files
 	$name .= ' ('.($seenit{$name}-1).')' if $seenit{$name}++;
-	$matches{$name} = [$inode,$parent,undef];
+	$matches{$name} = [$file_inode,$parent,undef];
     }
     $sth->finish;
     return \%matches;
@@ -2195,16 +2198,17 @@ sub path2inode {
     my $self   = shift;
     my $path   = shift;
 
-    my ($inode,$p_inode,$name) ;
-    eval {
-	($inode,$p_inode,$name)  = $self->_path2inode($path);
-    } or
+    my $dynamic;
+    my ($inode,$p_inode,$name) = eval {	$self->_path2inode($path)};
+    unless ($inode) {
 	($inode,$p_inode,$name) = $self->_dynamic_path2inode($path);
+	$dynamic++ if $inode;
+    }
     croak "$path not found" unless $inode;
 
     my $ctx = $self->get_context;
     $self->check_path($self->_dirname($path),$p_inode,@{$ctx}{'uid','gid'}) or die "permission denied";
-    return wantarray ? ($inode,$p_inode,$name) : $inode;
+    return wantarray ? ($inode,$p_inode,$name,$dynamic) : $inode;
 }
 
 sub _dynamic_path2inode {
