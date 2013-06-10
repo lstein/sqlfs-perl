@@ -992,9 +992,22 @@ sub get_dynamic_entries {
     eval {
 	$sth   = $dbh->prepare($query);
 	$sth->execute();
-    };
-    warn $@ if $@;
-    return {'SQL_ERROR'=>[0,0,$@]} if $@;
+    };	    
+
+    my $error_file = "$path/SQL_ERROR";
+    if ($@) {
+	my $msg = $@;
+	warn $msg;
+	eval {
+	    my $i = $self->path2inode($error_file) ||
+		$self->mknod($error_file,0444,0);
+	    $self->write($error_file,$msg,0,$i);
+	};
+	warn $@ if $@;
+	return;
+    } else {
+#	$self->unlink($error_file);
+    }
 
     my (%matches,%seenit);
     while (my ($inode,$name,$parent)=$sth->fetchrow_array) {
@@ -1263,7 +1276,6 @@ level. This checking is performed in the (optional) open() call.
 sub write {
     my $self = shift;
     my ($path,$data,$offset,$inode) = @_;
-
     $inode || defined $path or croak "no path or inode provided";
 
     unless ($inode) {
