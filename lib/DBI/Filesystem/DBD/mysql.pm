@@ -17,7 +17,7 @@ create table metadata (
     rdev         int(10)      default 0,
     links        int(10)      default 0,
     inuse        int(10)      default 0,
-    length       bigint       default 0,
+    size         bigint       default 0,
     mtime        timestamp    default 0,
     ctime        timestamp    default 0,
     atime        timestamp    default 0
@@ -53,8 +53,8 @@ sub _write_blocks {
     my ($inode,$blocks,$blksize) = @_;
 
     my $dbh = $self->dbh;
-    my ($length) = $dbh->selectrow_array("select length from metadata where inode=$inode");
-    my $hwm      = $length;  # high water mark ;-)
+    my ($size) = $dbh->selectrow_array("select size from metadata where inode=$inode");
+    my $hwm      = $size;  # high water mark ;-)
 
     my $tuples = join ',',('(?,?,?)')x(keys %$blocks);
     eval {
@@ -71,7 +71,7 @@ END
 	}
 	$sth->finish;
 	my $now = $self->_now_sql;
-	$dbh->do("update metadata set length=$hwm,mtime=$now where inode=$inode");
+	$dbh->do("update metadata set size=$hwm,mtime=$now where inode=$inode");
 	$dbh->commit();
     };
 

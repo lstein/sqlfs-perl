@@ -918,7 +918,7 @@ directory automagically. The query can span multiple lines, and
 lines that begin with "#" will be ignored. For example:
 
  # display all files greater than 2 Mb in size
- select inode from metadata where length>2000000
+ select inode from metadata where size>2000000
 
 Another example:
 
@@ -928,6 +928,9 @@ Another example:
      where p.name like '%.jpg'
        and (now()-interval 1 day) <= m.mtime
        and m.inode=p.inode
+
+Magic directories only populate files. Directories are excluded
+because of cycle issues.
 
 =cut
 
@@ -995,7 +998,6 @@ sub get_dynamic_entries {
 
     my (%matches,%seenit);
     while (my ($inode,$name,$parent)=$sth->fetchrow_array) {
-	next if $self->_is_dynamic_dir($inode,$name); # too weirdly recursive
 	$name .= ' ('.($seenit{$name}-1).')' if $seenit{$name}++;
 	$matches{$name} = [$inode,$parent,undef];
     }
@@ -1031,6 +1033,7 @@ sub _isdir {
 sub _is_dynamic_dir {
     my $self = shift;
     my ($inode,$path) = @_;
+    return unless $path;
     return $path =~ m!(?:^|/)%%[^/]+$! && $self->_isdir($inode) 
 }
 
@@ -1233,7 +1236,7 @@ sub read {
     my $get_atime = $self->_get_unix_timestamp_sql('atime');
     my $get_mtime = $self->_get_unix_timestamp_sql('mtime');
     my ($current_length,$atime,$mtime) = 
-	$self->dbh->selectrow_array("select length,$get_atime,$get_mtime from metadata where inode=$inode");
+	$self->dbh->selectrow_array("select size,$get_atime,$get_mtime from metadata where inode=$inode");
     if ($length+$offset > $current_length) {
 	$length = $current_length - $offset;
     }
@@ -1322,7 +1325,7 @@ sub _write_blocks {
     my ($inode,$blocks,$blksize) = @_;
 
     my $dbh = $self->dbh;
-    my ($length) = $dbh->selectrow_array("select length from metadata where inode=$inode");
+    my ($length) = $dbh->selectrow_array("select size from metadata where inode=$inode");
     my $hwm      = $length;  # high water mark ;-)
 
     eval {
@@ -1339,7 +1342,7 @@ END
 	}
 	$sth->finish;
 	my $now = $self->_now_sql;
-	$dbh->do("update metadata set length=$hwm,mtime=$now where inode=$inode");
+	$dbh->do("update metadata set size=$hwm,mtime=$now where inode=$inode");
 	$dbh->commit();
     };
 
@@ -1467,7 +1470,7 @@ sub ftruncate {
 	$dbh->begin_work;
 	$dbh->do("delete from extents where inode=$inode and block>$last_block");
 	$dbh->do("update      extents set contents=substr(contents,1,$trunc) where inode=$inode and block=$last_block");
-	$dbh->do("update metadata set length=$length where inode=$inode");
+	$dbh->do("update metadata set size=$length where inode=$inode");
 	$self->touch($inode,'mtime');
 	$dbh->commit;
     };
@@ -1625,7 +1628,7 @@ metadata:
  | rdev   | int(10)    | YES  |     | 0                   |                |
  | links  | int(10)    | YES  |     | 0                   |                |
  | inuse  | int(10)    | YES  |     | 0                   |                |
- | length | bigint(20) | YES  |     | 0                   |                |
+ | size   | bigint(20) | YES  |     | 0                   |                |
  | mtime  | timestamp  | NO   |     | 0000-00-00 00:00:00 |                |
  | ctime  | timestamp  | NO   |     | 0000-00-00 00:00:00 |                |
  | atime  | timestamp  | NO   |     | 0000-00-00 00:00:00 |                |
@@ -1758,7 +1761,7 @@ containing "holes") to be stored efficiently: Blocks that fall within
 holes are completely absent from the table, while those that lead into
 a hole are shorter than the full block length.
 
-The logical length of the file is stored in the metadata length
+The logical length of the file is stored in the metadata size
 column.
 
 If you have subclassed DBI::Filesystem and wish to adjust the default
@@ -2339,7 +2342,7 @@ sub _fgetattr_sql {
     my $times = join ',',map{$self->_get_unix_timestamp_sql($_)} 'ctime','mtime','atime';
     return <<END;
 select inode,mode,uid,gid,rdev,links,
-       $times,length
+       $times,size
  from metadata
  where inode=$inode
 END

@@ -33,7 +33,7 @@ create table metadata (
     rdev         int(10)      default 0,
     links        int(10)      default 0,
     inuse        int(10)      default 0,
-    length       bigint       default 0,
+    size         bigint       default 0,
     mtime        integer,
     ctime        integer,
     atime        integer
