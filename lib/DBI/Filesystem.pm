@@ -758,12 +758,6 @@ sub rename {
     $sth->execute($newbase,$newparent,$parent,$basename);
     $sth->finish;
     1;
-
-# although this seemed to make sense at the time, 
-# it is NOT the right way to do it, as it fails on directories!
-#    $self->link($oldname,$newname);
-#    $self->unlink($oldname);
-#    1;
 }
 
 =head2 $fs->unlink($path)
