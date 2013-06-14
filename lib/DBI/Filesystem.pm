@@ -997,8 +997,57 @@ sub get_dynamic_entries {
     my $self = shift;
     my ($inode,$path) = @_;
 
+    return $self->_get_cached_dynamic_entries($inode,$path)
+	|| $self->_set_cached_dynamic_entries($inode,$path);
+}
+
+sub _get_cached_dynamic_entries {
+    my $self = shift;
+    my ($inode,$path) = @_;
+
+    my $dbh   = $self->dbh;
+    my $query = <<END;
+select inode,name,parent
+  from dynamic_cache
+   where directory=? and time>=?
+END
+;
+    my %matches;
+    eval {
+	my $sth = $dbh->prepare_cached($query);
+	$sth->execute($inode,time()-30); # cache time 30s for testing -- should make shorter
+
+	while (my ($file_inode,$name,$parent)=$sth->fetchrow_array) {
+	    $matches{$name} = [$file_inode,$parent];
+	}
+    };
+    warn "_get_cached_dynamic_entries, error = $@";
+    return unless %matches;
+    return \%matches;
+}
+
+sub _set_cached_dynamic_entries {
+    my $self = shift;
+    my ($inode,$path) = @_;
+
+    warn "_set_cached_dynamic_entries($inode,$path)";
+
+    my $dbh   = $self->dbh;
+
+    # create a temporary table to hold the results
+    $dbh->do(<<END);
+create temporary table if not exists dynamic_cache 
+     (directory integer,
+      time      integer,
+      inode     integer,
+      name      varchar(255),
+      parent    integer)
+END
+;
+
+    $dbh->do("delete from dynamic_cache where directory=$inode");
+
     # look for a file named .query
-    my $dbh     = $self->dbh;
     my ($query_inode) = 
 	$dbh->selectrow_array("select inode from path where name='.query' and parent=$inode");
     return unless $query_inode;
@@ -1009,11 +1058,19 @@ sub get_dynamic_entries {
 
     # run the query
     my $isdir = 0x4000;
-    my $query = "select p.inode,p.name,p.parent from path as p,metadata as m where p.inode=m.inode and ($isdir&m.mode)=0 and p.inode in ($sql)";
+    my $query = <<END;
+insert into dynamic_cache (directory,time,inode,name,parent)
+ select ?,?,p.inode,p.name,p.parent 
+ from path as p,metadata as m
+   where p.inode=m.inode 
+     and ($isdir&m.mode)=0 
+       and p.inode in ($sql)
+END
+    ;;
     my $sth;
     eval {
 	$sth   = $dbh->prepare($query);
-	$sth->execute();
+	$sth->execute($inode,time());
     };	    
 
     my $error_file = "$path/SQL_ERROR";
@@ -1032,15 +1089,8 @@ sub get_dynamic_entries {
 	    $self->unlink($error_file) if $self->_path2inode($error_file);
 	};
     }
-
-    my (%matches,%seenit);
-    while (my ($file_inode,$name,$parent)=$sth->fetchrow_array) {
-	next if $parent==$inode; # don't self-reference files
-	$name .= ' ('.($seenit{$name}-1).')' if $seenit{$name}++;
-	$matches{$name} = [$file_inode,$parent,undef];
-    }
     $sth->finish;
-    return \%matches;
+    return $self->_get_cached_dynamic_entries($inode,$path);
 }
 
 =head2 $boolean = $fs->isdir($path)
@@ -1413,7 +1463,7 @@ sub flush {
     # if called with no inode, then recursively call ourselves
     # to flush all cached inodes
     unless ($inode) {
-	for my $i (keys %{$self->{blockbuff}}) {
+	for my $i (keys %Blockbuff) {
 	    $self->flush(undef,$i);
 	}
 	return;
@@ -2126,7 +2176,7 @@ END
 Given a file or directory's inode and the access mode (a bitwise OR of
 R_OK, W_OK, X_OK), checks whether the current user is allowed
 access. This will return if access is allowed, or raise a fatal error
-otherwise.
+potherwise.
 
 =cut
 
