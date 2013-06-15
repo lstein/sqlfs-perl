@@ -12,6 +12,7 @@ Options:
 
   --initialize                  initialize an empty filesystem
   --quiet                       don't ask for confirmation of initialization
+  --allow_magic                 allow "magic" directories (see below)
   --unmount                     unmount the indicated directory
   --foreground                  remain in foreground (false)
   --nothreads                   disable threads (false)
@@ -82,6 +83,45 @@ DBI::Filesystem module can be extended via subclassing to allow
 additional functionality such as arbitrary access control rules,
 searchable file and directory metadata, full-text indexing of file
 contents, etc.
+
+=head2 "Magic" Directories
+
+The --allow_magic option enables a form of "view" directory in which
+the directory is automagically populated with the results of running a
+simple (or complex) SQL query across the entire filesystem. To try
+this out, create one or more directories that begin with the magic
+characters "%%", and then create a dotfile within this directory named
+".query".  ".query" must contain a SQL query that returns a series of
+one or more inodes. These will be used to populate the directory
+automagically. The query can span multiple lines, and lines that begin
+with "#" will be ignored.
+
+You must understand the simple schema used by this module to be able
+to write such queries. To learn about the schema, see
+L<DBI::Filesystem>.
+
+Here is a simple example which will run on all DBMSs:
+
+ # display all files greater than 2 Mb in size
+ select inode from metadata where size>2000000
+
+Another example, which uses MySQL-specific date/time
+math:
+
+ # all .jpg files created/modified within the last day
+ select m.inode from metadata as m,path as p
+     where p.name like '%.jpg'
+       and (now()-interval 1 day) <= m.mtime
+       and m.inode=p.inode
+
+(The date/time math syntax is very slightly different for PostgreSQL
+and very much different for SQLite)
+
+The files contained within the magic directories can be read and
+written just like normal files, but cannot be removed or
+renamed. Directories are excluded from magic directories. If two or
+more files from different parts of the filesystem have name clashes,
+the filesystem will append a number to their end to distinguish them.
 
 =head2 Unsupported Features
 
@@ -166,12 +206,13 @@ use Getopt::Long qw(:config no_ignore_case bundling_override);
 use Pod::Usage;
 
 my (@FuseOptions,$Module,$UnMount,$Initialize,$Debug,$Quiet,
-    $NoDaemon,$NoThreads,$Help,$Man);
+    $AllowMagic,$NoDaemon,$NoThreads,$Help,$Man);
 
 GetOptions(
     'help|h|?'     => \$Help,
     'man|m'        => \$Man,
     'initialize|i' => \$Initialize,
+    'allow_magic|a' => \$AllowMagic,
     'option|o:s'   => \@FuseOptions,
     'foreground|f' => \$NoDaemon,
     'nothreads|n'  => \$NoThreads,
@@ -213,7 +254,7 @@ my $mountopts  = join(',',@FuseOptions);
 $Module ||= 'DBI::Filesystem';
 eval "require $Module;1"        or die $@;
 $Module->isa('DBI::Filesystem') or die "$Module does not inherit from DBI::Filesystem. Abort!\n";
-my $filesystem = $Module->new($dsn,{initialize=>$Initialize});
+my $filesystem = $Module->new($dsn,{initialize=>$Initialize,allow_magic_dirs=>$AllowMagic});
 
 # become daemon after loading the module, to avoid paths getting confused
 become_daemon() unless $NoDaemon;
