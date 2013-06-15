@@ -123,5 +123,27 @@ sub last_inserted_inode {
     return $dbh->last_insert_id(undef,undef,'metadata','inode');
 }
 
+sub set_schema_version {
+    my $self = shift;
+    my $version = shift;
+    my $dbh = $self->dbh;
+    eval {
+	$dbh->begin_work;
+	$dbh->do("delete from sqlfs_vars where name='schema_version'");
+	$dbh->do("insert into sqlfs_vars (name,value) values ('schema_version','$version')");
+	$dbh->commit;
+    };
+    if ($@) {
+	warn $@;
+	eval {$dbh->rollback()};
+    }
+}
+
+sub _update_schema_from_1_to_2 {
+    my $self = shift;
+    my $dbh  = $self->dbh;
+    $dbh->do('alter table metadata rename column length to size');
+    $dbh->do($self->_variables_table_def);
+}
 1;
 

@@ -77,5 +77,15 @@ sub _update_utime_sql {
     return "update metadata set atime=?,mtime=? where inode=?";
 }
 
+sub _update_schema_from_1_to_2 {
+    my $self = shift;
+    my $dbh  = $self->dbh;
+    $dbh->do('alter table metadata rename to metadata_old');
+    $dbh->do($self->_metadata_table_def);
+    $dbh->do($self->_variables_table_def);
+    $dbh->do('insert into metadata  select * from metadata_old');
+    $dbh->do('drop table metadata_old');
+}
+
 1;
 

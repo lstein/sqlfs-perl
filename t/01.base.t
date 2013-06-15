@@ -5,7 +5,7 @@
 
 use strict;
 use FindBin '$Bin';
-use lib $Bin;
+use lib $Bin,"$Bin/../lib";
 
 use Test::More;
 use POSIX qw(ENOENT EISDIR ENOTDIR EINVAL ENOTEMPTY EACCES EIO);

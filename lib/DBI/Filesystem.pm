@@ -185,8 +185,9 @@ use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO EPER
              S_IXUSR S_IXGRP S_IXOTH);
 use Carp 'croak';
 
-our $VERSION = '1.01';
+our $VERSION = '1.02';
 
+use constant SCHEMA_VERSION => 2;
 use constant MAX_PATH_LEN => 4096;  # characters
 use constant BLOCKSIZE    => 16384;  # bytes
 use constant FLUSHBLOCKS  => 256;    # flush after we've accumulated this many cached blocks
@@ -241,7 +242,10 @@ sub new {
 	%$options
     },$subclass;
 
+    local $self->{dbh};  # to avoid cloning database handle into child threads
+
     $self->initialize_schema if $options->{initialize};
+    $self->check_schema_version;
     return $self;
 }
 
@@ -1858,11 +1862,11 @@ you please.
 
 sub initialize_schema {
     my $self = shift;
-    local $self->{dbh};  # to avoid cloning database handle into child threads
     my $dbh  = $self->dbh;
-    $dbh->do('drop table if exists metadata') or croak $dbh->errstr;
-    $dbh->do('drop table if exists path')     or croak $dbh->errstr;
-    $dbh->do('drop table if exists extents')  or croak $dbh->errstr;
+    $dbh->do('drop table if exists metadata')   or croak $dbh->errstr;
+    $dbh->do('drop table if exists path')       or croak $dbh->errstr;
+    $dbh->do('drop table if exists extents')    or croak $dbh->errstr;
+    $dbh->do('drop table if exists sqlfs_vars') or croak $dbh->errstr;
     eval{$dbh->do('drop index if exists iblock')};
     eval{$dbh->do('drop index if exists ipath')};
 
@@ -1870,6 +1874,7 @@ sub initialize_schema {
     $dbh->do($_) foreach split ';',$self->_metadata_table_def;
     $dbh->do($_) foreach split ';',$self->_path_table_def;
     $dbh->do($_) foreach split ';',$self->_extents_table_def;
+    $dbh->do($_) foreach split ';',$self->_variables_table_def;
 
     # create the root node
     # should update this to use fuse_get_context to get proper uid, gid and masked permissions
@@ -1883,7 +1888,16 @@ sub initialize_schema {
 	or croak $dbh->errstr;
     $dbh->do("insert into path (inode,name,parent) values (1,'/',null)")
 	or croak $dbh->errstr;
+    $self->set_schema_version($self->schema_version);
 }
+
+=head2 $ok = $fs->check_schema
+
+This method is called when opening a preexisting database. It checks
+that the metadata, path and extents tables exist in the database and
+have the expected relationships. Returns true if the check passes.
+
+=cut
 
 sub check_schema {
     my $self     = shift;
@@ -1896,7 +1910,111 @@ END
     return !$@;
 }
 
-=head2 $size = $fs->blocksize
+=head2 $version = $fs->schema_version
+
+This method returns the schema version understood by this module. It
+is used when opening up a sqlfs databse to check whether database was
+created by an earlier or later version of the software. The schema
+version is distinct from the library version since updates to the library
+do not always necessitate updates to the schema.
+
+Versions are small integers beginning at 1.
+
+=cut
+
+sub schema_version {
+    return SCHEMA_VERSION;
+}
+
+=head2 $version = $fs->get_schema_version
+
+This returns the schema version known to a preexisting database.
+
+=cut
+
+sub get_schema_version {
+    my $self = shift;
+    my ($result) = eval { $self->dbh->selectrow_array("select value from sqlfs_vars where name='schema_version'") };
+    return $result || 1;
+}
+
+=head2 $fs->set_schema_version($version)
+
+This sets the databases's schema version to the indicated value.
+
+=cut
+
+sub set_schema_version {
+    my $self = shift;
+    my $version = shift;
+    $self->dbh->do("replace into sqlfs_vars (name,value) values ('schema_version','$version')");
+}
+
+=head2 $fs->check_schema_version 
+
+This checks whether the schema version in a preexisting database is
+compatible with the version known to the library. If the version is
+from an earlier version of the library, then schema updating will be
+attempted. If the database was created by a newer version of the
+software, the method will raise a fatal exception.
+
+=cut
+
+sub check_schema_version {
+    my $self = shift;
+    my $current_version = $self->schema_version;
+    my $db_version      = $self->get_schema_version;
+    return if $current_version == $db_version;
+    die "This module understands schema version $current_version, but database was created with schema version $db_version"
+	if $db_version > $current_version;
+    # otherwise we evolve...
+    my $ok = 1;
+    for (my $i=$db_version;$i<$current_version;$i++) {
+	print STDERR "Updating database schema from $i to ",$i+1,"...\n";
+	my $method = "_update_schema_from_${i}_to_".($i+1);
+	$ok &&= eval{$self->$method};
+	warn $@ if $@;
+    }
+    die "Update failed" unless $ok;
+    eval {$self->dbh->do($_)} foreach split ';',$self->_variables_table_def;
+    $self->set_schema_version($self->schema_version);
+}
+
+###### schema update statements ######
+
+=head2 $fs->_update_schema_from_A_to_B
+
+Every update to this library that defines a new schema version has a
+series of methods named _update_schema_from_A_to_B(), where A and B are
+sequential version numbers. For example, if the current schema version
+is 3, then the library will define the following methods:
+
+ $fs->_update_schema_from_1_to_2
+ $fs->_update_schema_from_2_to_3
+
+These methods are only of interests to people who want to write
+adapters for DBMS engines that are not currently supported, such as
+Oracle.
+
+=cut
+
+sub _update_schema_from_1_to_2 {
+    my $self = shift;
+    my $dbh  = $self->dbh;
+    $dbh->do('alter table metadata change column length size bigint default 0');
+    $dbh->do($self->_variables_table_def);
+}
+
+sub _variables_table_def {
+    return <<END;
+create table sqlfs_vars (
+    name   varchar(255) primary key,
+    value  varchar(255)
+)
+END
+}
+
+=Head2 $size = $fs->blocksize
 
 This method returns the blocksize (currently 4096 bytes) used for
 writing and retrieving file contents to the extents table. Because
