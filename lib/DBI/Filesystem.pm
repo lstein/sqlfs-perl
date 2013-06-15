@@ -941,10 +941,10 @@ lines that begin with "#" will be ignored. For example:
  # display all files greater than 2 Mb in size
  select inode from metadata where size>2000000
 
-Another example:
+Another example, which uses MySQL-specific date/time
+math:
 
- # all .jpg files created/modified more recently
- # within the past day (MySQL-specific!)
+ # all .jpg files created/modified within the last day
  select m.inode from metadata as m,path as p
      where p.name like '%.jpg'
        and (now()-interval 1 day) <= m.mtime
@@ -1012,16 +1012,16 @@ select inode,name,parent
    where directory=? and time>=?
 END
 ;
-    my %matches;
+    my (%matches,%seenit);
     eval {
 	my $sth = $dbh->prepare_cached($query);
-	$sth->execute($inode,time()-30); # cache time 30s for testing -- should make shorter
+	$sth->execute($inode,time()-1); # cache time 1s at most
 
 	while (my ($file_inode,$name,$parent)=$sth->fetchrow_array) {
+	    $name .= '('.($seenit{$name}-1).')' if $seenit{$name}++;
 	    $matches{$name} = [$file_inode,$parent];
 	}
     };
-    warn "_get_cached_dynamic_entries, error = $@";
     return unless %matches;
     return \%matches;
 }
@@ -1029,8 +1029,6 @@ END
 sub _set_cached_dynamic_entries {
     my $self = shift;
     my ($inode,$path) = @_;
-
-    warn "_set_cached_dynamic_entries($inode,$path)";
 
     my $dbh   = $self->dbh;
 
