@@ -187,7 +187,7 @@ use Carp 'croak';
 
 our $VERSION = '1.02';
 
-use constant SCHEMA_VERSION => 2;
+use constant SCHEMA_VERSION => 3;
 use constant ENOATTR      => ENOENT;  # not sure this is right?
 use constant MAX_PATH_LEN => 4096;  # characters
 use constant BLOCKSIZE    => 16384;  # bytes
@@ -1679,29 +1679,31 @@ sub errno {
 sub setxattr {
     my $self = shift;
     my ($path,$xname,$xval,$xflags) = @_;
-    warn "@_";
     my $inode = $self->path2inode($path);
-    warn "inode=$inode";
     my $dbh = $self->dbh;
-    if ($xflags&XATTR_REPLACE) {
-	warn "replace?!!";
+    if (!$xflags) {
+	my $sql = 'replace into xattr (inode,name,value) values (?,?,?)';
+	my $sth = $dbh->prepare_cached($sql);
+	$sth->execute($inode,$xname,$xval);
+	$sth->finish;
+    }
+    elsif ($xflags&XATTR_REPLACE) {
 	my $sql = 'update xattr set value=? where inode=? and name=?';
 	my $sth = $dbh->prepare_cached($sql);
 	eval {$sth->execute($xval,$inode,$xname)};
 	$sth->finish;
 	die "no such attribute" unless $dbh->rows>0;
-	return;
     }
-#    if ($xflags&XATTR_CREATE) {
+    elsif ($xflags&XATTR_CREATE) {
 	my $sql = 'insert into xattr (inode,name,value) values (?,?,?)';
 	my $sth = $dbh->prepare_cached($sql);
 	eval {$sth->execute($inode,$xname,$xval)};
-	warn $@;
 	die "attribute exists" if $@ =~ /not unique|duplicate/i;
 	$sth->finish;
-	warn "here I am";
-	return;
-#    }
+    } else {
+	die "Can't interpret value of setxattr flags=$xflags";
+    }
+    return 0;
 }
 
 sub getxattr {
@@ -2064,6 +2066,12 @@ sub _update_schema_from_1_to_2 {
     my $dbh  = $self->dbh;
     $dbh->do('alter table metadata change column length size bigint default 0');
     $dbh->do($self->_variables_table_def);
+}
+
+sub _update_schema_from_2_to_3 {
+    my $self = shift;
+    my $dbh  = $self->dbh;
+    $dbh->do($self->_xattr_table_def);
 }
 
 sub _variables_table_def {
