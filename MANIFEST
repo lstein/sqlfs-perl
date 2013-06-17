@@ -14,7 +14,6 @@ t/02.nodes.t
 t/03.modes.t
 t/04.permissions.t
 t/05.extents.t
-t/06.fuse.t
 t/06.xattr.t
 t/07.fuse.t
 t/select_dsn.pm
