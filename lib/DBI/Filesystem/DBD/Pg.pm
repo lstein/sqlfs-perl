@@ -56,6 +56,18 @@ create table extents (
 END
 }
 
+sub _xattr_table_def {
+    my $self = shift;
+    return <<END;
+create table xattr (
+    inode integer,
+    name  varchar(255),
+    value varchar(65536)
+    );
+    create unique index ixattr on xattr (inode,name)
+END
+}
+
 sub _get_unix_timestamp_sql {
     my $self  = shift;
     my $field = shift;
@@ -137,6 +149,33 @@ sub set_schema_version {
 	warn $@;
 	eval {$dbh->rollback()};
     }
+}
+
+sub setxattr {
+    my $self = shift;
+    my ($path,$xname,$xval,$xflags) = @_;
+    if (!$xflags) {
+	my $inode = $self->path2inode($path);
+	my $dbh = $self->dbh;
+	eval {
+	    my $name = $dbh->quote($xname);
+	    $dbh->begin_work;
+	    $dbh->do("delete from xattr where name=$name and inode=$inode");
+	    my $sth = $dbh->prepare_cached("insert into xattr(inode,name,value) values (?,?,?)");
+	    $sth->execute($inode,$xname,$xval);
+	    $sth->finish;
+	    $dbh->commit();
+	};
+	if ($@) {
+	    my $msg = $@;
+	    eval {$dbh->rollback()};
+	    die "could not update attribute because: $msg";
+	}
+	return 0;
+    }
+
+    # we get here when we have a definite insert/update operation to perform
+    return $self->SUPER::setxattr(@_);
 }
 
 sub _update_schema_from_1_to_2 {

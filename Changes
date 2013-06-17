@@ -1,10 +1,13 @@
+Version 1.03
+   - Add support for extended attributes.
+
 Version 1.02
-   - Fix broken rename() method, which previously wasn't able
-     to rename directories.
    - Add a "magic directories" feature, which allows you to create
      directories dynamically populated by the results of running a
      SQL query.
    - Rename "length" to "size" in metadata table.
+   - Fix broken rename() method, which previously wasn't able
+     to rename directories.
    - Add a schema evolution mechanism.
 
 Version 1.01 Fri Jun  7 13:21:43 EDT 2013

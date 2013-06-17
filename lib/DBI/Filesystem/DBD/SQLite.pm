@@ -63,6 +63,19 @@ create table extents (
 END
 }
 
+sub _xattr_table_def {
+    my $self = shift;
+    return <<END;
+create table xattr (
+    inode integer,
+    name  varchar(255),
+    value varchar(65536)
+    );
+    create unique index ixattr on xattr (inode,name)
+END
+}
+
+
 sub _get_unix_timestamp_sql {
     my $self  = shift;
     my $field = shift;

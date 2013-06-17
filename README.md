@@ -121,6 +121,7 @@ The sqlfs.pl has a number of options listed here:
 
       --initialize                  initialize an empty filesystem
       --quiet                       don't ask for confirmation of initialization
+      --allow_magic                 allow "magic" directories (see below)
       --unmount                     unmount the indicated directory
       --foreground                  remain in foreground (false)
       --nothreads                   disable threads (false)
@@ -143,6 +144,53 @@ The sqlfs.pl has a number of options listed here:
 
 More information can be obtained by passing the sqlfs.pl command the
 --man option.
+
+"Magic" Directories
+===================
+
+The --allow_magic option enables a form of "view" directory in which
+the directory is automagically populated with the results of running a
+simple (or complex) SQL query across the entire filesystem. To try
+this out, create one or more directories that begin with the magic
+characters "%%", and then create a dotfile within this directory named
+".query".  ".query" must contain a SQL query that returns a series of
+one or more inodes. These will be used to populate the directory
+automagically. The query can span multiple lines, and lines that begin
+with "#" will be ignored.
+
+You must understand the simple schema used by this module to be able
+to write such queries. To learn about the schema, see
+L<DBI::Filesystem>.
+
+Here is a simple example which will run on all DBMSs. It displays all
+files with size greater than 2 Mb:
+
+ select inode from metadata where size>2000000
+
+Another example, which uses MySQL-specific date/time
+math to find all .jpg files created/modified within the last day:
+
+ select m.inode from metadata as m,path as p
+     where p.name like '%.jpg'
+       and (now()-interval 1 day) <= m.mtime
+       and m.inode=p.inode
+
+(The date/time math syntax is very slightly different for PostgreSQL
+and considerably different for SQLite)
+
+An example that uses extended attributes to search for all documents
+authored by someone with "Lincoln" in the name:
+
+ select m.inode from metadata as m,xattr as x
+    where x.name == 'user.Author'
+     and x.value like 'Lincoln%'
+     and m.inode=x.inode
+    
+The files contained within the magic directories can be read and
+written just like normal files, but cannot be removed or
+renamed. Directories are excluded from magic directories. If two or
+more files from different parts of the filesystem have name clashes,
+the filesystem will append a number to their end to distinguish them.
 
 System Performance
 ==================

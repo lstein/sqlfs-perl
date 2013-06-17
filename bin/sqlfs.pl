@@ -130,8 +130,6 @@ The following features are not implemented:
  * statfs -- df on the filesystem will not provide any useful information
             on free space or other filesystem information.
 
- * extended attributes -- Extended attributes are not supported.
-
  * nanosecond times -- atime, mtime and ctime are accurate only to the
             second.
 
