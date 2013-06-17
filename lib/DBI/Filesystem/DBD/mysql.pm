@@ -47,6 +47,18 @@ create table extents (
 END
 }
 
+sub _xattr_table_def {
+    my $self = shift;
+    return <<END;
+create table xattr (
+    inode integer,
+    name  varchar(255),
+    value varchar(65536),
+    unique index ixattr (inode,name)
+) ENGINE=INNODB
+END
+}
+
 # mysql-specific optimization
 sub _write_blocks {
     my $self = shift;

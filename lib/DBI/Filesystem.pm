@@ -175,7 +175,7 @@ The following methods are most likely to be needed by users of this module.
 use strict;
 use warnings;
 use DBI;
-use Fuse 'fuse_get_context';
+use Fuse 'fuse_get_context',':xattr';
 use threads;
 use threads::shared;
 use File::Basename 'basename','dirname';
@@ -188,6 +188,7 @@ use Carp 'croak';
 our $VERSION = '1.02';
 
 use constant SCHEMA_VERSION => 2;
+use constant ENOATTR      => ENOENT;  # not sure this is right?
 use constant MAX_PATH_LEN => 4096;  # characters
 use constant BLOCKSIZE    => 16384;  # bytes
 use constant FLUSHBLOCKS  => 256;    # flush after we've accumulated this many cached blocks
@@ -1669,8 +1670,68 @@ sub errno {
     return -EINVAL()    if $message =~ /length beyond end of file/;
     return -ENOTEMPTY() if $message =~ /not empty/;
     return -EACCES()    if $message =~ /permission denied/;
+    return -ENOATTR()   if $message =~ /no such attribute/;
+    return -EEXIST()    if $message =~ /attribute exists/;
     warn $message;      # something unexpected happened!
     return -EIO();
+}
+
+sub setxattr {
+    my $self = shift;
+    my ($path,$xname,$xval,$xflags) = @_;
+    warn "@_";
+    my $inode = $self->path2inode($path);
+    warn "inode=$inode";
+    my $dbh = $self->dbh;
+    if ($xflags&XATTR_REPLACE) {
+	warn "replace?!!";
+	my $sql = 'update xattr set value=? where inode=? and name=?';
+	my $sth = $dbh->prepare_cached($sql);
+	eval {$sth->execute($xval,$inode,$xname)};
+	$sth->finish;
+	die "no such attribute" unless $dbh->rows>0;
+	return;
+    }
+#    if ($xflags&XATTR_CREATE) {
+	my $sql = 'insert into xattr (inode,name,value) values (?,?,?)';
+	my $sth = $dbh->prepare_cached($sql);
+	eval {$sth->execute($inode,$xname,$xval)};
+	warn $@;
+	die "attribute exists" if $@ =~ /not unique|duplicate/i;
+	$sth->finish;
+	warn "here I am";
+	return;
+#    }
+}
+
+sub getxattr {
+    my $self = shift;
+    my ($path,$xname) = @_;
+    my $inode = $self->path2inode($path);
+    my $dbh   = $self->dbh;
+    my $name  = $dbh->quote($xname);
+    my ($value) = $dbh->selectrow_array("select value from xattr where inode=$inode and name=$name");
+    return 0 unless defined $value;
+    return $value;
+}
+
+sub listxattr {
+    my $self = shift;
+    my $path = shift;
+    my $inode = $self->path2inode($path);
+    my $names = $self->dbh->selectcol_arrayref("select name from xattr where inode=$inode");
+    $names ||= [];
+    return (@$names,0);
+}
+
+sub removexattr {
+    my $self = shift;
+    my ($path,$xname) = @_;
+    my $dbh = $self->dbh;
+    my $inode = $self->path2inode($path);
+    my $name  = $dbh->quote($xname);
+    $dbh->do("delete from xattr where inode=$inode and name=$name");
+    return 0;
 }
 
 =head1 LOW LEVEL METHODS
@@ -1867,6 +1928,7 @@ sub initialize_schema {
     $dbh->do('drop table if exists path')       or croak $dbh->errstr;
     $dbh->do('drop table if exists extents')    or croak $dbh->errstr;
     $dbh->do('drop table if exists sqlfs_vars') or croak $dbh->errstr;
+    $dbh->do('drop table if exists xattr')      or croak $dbh->errstr;
     eval{$dbh->do('drop index if exists iblock')};
     eval{$dbh->do('drop index if exists ipath')};
 
@@ -1875,6 +1937,7 @@ sub initialize_schema {
     $dbh->do($_) foreach split ';',$self->_path_table_def;
     $dbh->do($_) foreach split ';',$self->_extents_table_def;
     $dbh->do($_) foreach split ';',$self->_variables_table_def;
+    $dbh->do($_) foreach split ';',$self->_xattr_table_def;
 
     # create the root node
     # should update this to use fuse_get_context to get proper uid, gid and masked permissions
@@ -1903,11 +1966,9 @@ sub check_schema {
     my $self     = shift;
     local $self->{dbh};  # to avoid cloning database handle into child threads
     my ($result) = eval {
-	$self->dbh->selectrow_array(<<END);
-select 1 from metadata as m,path as p left join extents as e on e.inode=p.inode where m.inode=1 and p.parent=1
-END
+ 	$self->dbh->selectrow_array('select 1 from metadata as m,path as p left join extents as e on e.inode=p.inode where m.inode=1 and p.parent=1');
     };
-    return !$@;
+     return !$@;
 }
 
 =head2 $version = $fs->schema_version
@@ -2558,6 +2619,7 @@ sub _create_inode_sql {
     my $now = $self->_now_sql;
     return "insert into metadata (mode,uid,gid,rdev,links,mtime,ctime,atime) values(?,?,?,?,?,$now,$now,$now)";
 }
+
 
 1;
 
