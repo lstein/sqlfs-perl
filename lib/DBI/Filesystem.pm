@@ -1106,7 +1106,8 @@ insert into dynamic_cache (directory,time,inode,name,parent)
  from path as p,metadata as m
    where p.inode=m.inode 
      and ($isdir&m.mode)=0 
-       and p.inode in ($sql)
+       and p.parent <> $inode
+         and p.inode in ($sql)
 END
     ;;
     my $sth;
