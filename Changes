@@ -1,3 +1,6 @@
+Version 1.04
+   - Fix regression test hangs
+
 Version 1.03
    - Add support for extended attributes.
 

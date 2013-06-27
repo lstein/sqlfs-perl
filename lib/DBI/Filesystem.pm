@@ -185,7 +185,7 @@ use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO EPER
              S_IXUSR S_IXGRP S_IXOTH);
 use Carp 'croak';
 
-our $VERSION = '1.03';
+our $VERSION = '1.04';
 
 use constant SCHEMA_VERSION => 3;
 use constant ENOATTR      => ENOENT;  # not sure this is right?

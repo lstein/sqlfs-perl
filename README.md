@@ -20,6 +20,16 @@ additional functionality such as arbitrary access control rules,
 searchable file and directory metadata, full-text indexing of file
 contents, etc.
 
+Installing DBD Drivers
+======================
+
+To install Perl drivers for the supported DBMSs, run one or more of
+the following commands from the command line:
+
+ % perl -MCPAN -e 'install DBD::mysql'      # Mysql
+ % perl -MCPAN -e 'instell DBD::SQLite'     # SQLite
+ % perl -MCPAN -e 'install DBD::Pg'         # PostgreSQL
+
 Using the Module
 ================
 

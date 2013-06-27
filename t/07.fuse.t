@@ -86,6 +86,7 @@ for my $dsn (@dsn) {
     is($data,'this is a test','read on unlinked file ok');
     close $fh;
 
+    sleep 2;
 }    
 
 
