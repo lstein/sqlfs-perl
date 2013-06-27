@@ -185,7 +185,7 @@ use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO EPER
              S_IXUSR S_IXGRP S_IXOTH);
 use Carp 'croak';
 
-our $VERSION = '1.01';
+our $VERSION = '1.02';
 
 use constant MAX_PATH_LEN => 4096;  # characters
 use constant BLOCKSIZE    => 16384;  # bytes
