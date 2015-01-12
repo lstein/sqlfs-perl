@@ -183,6 +183,7 @@ use File::Spec;
 use POSIX qw(ENOENT EISDIR ENOTDIR ENOTEMPTY EINVAL ECONNABORTED EACCES EIO EPERM EEXIST
              O_RDONLY O_WRONLY O_RDWR O_CREAT F_OK R_OK W_OK X_OK
              S_IXUSR S_IXGRP S_IXOTH);
+use Memoize 'memoize','flush_cache';
 use Carp 'croak';
 
 our $VERSION = '1.04';
@@ -194,7 +195,6 @@ use constant BLOCKSIZE    => 16384;  # bytes
 use constant FLUSHBLOCKS  => 256;    # flush after we've accumulated this many cached blocks
 
 my %Blockbuff :shared;
-
 
 =head2 $fs = DBI::Filesystem->new($dsn,{options...})
 
@@ -242,6 +242,8 @@ sub new {
 	dsn          => $dsn,
 	%$options
     },$subclass;
+
+#    memoize("_path2inode");
 
     local $self->{dbh};  # to avoid cloning database handle into child threads
 
@@ -547,6 +549,7 @@ sub e_mkdir {
     my $umask          = $ctx->{umask};
     eval {$Self->mkdir($path,$mode&(~$umask))};
     return $Self->errno($@) if $@;
+    $Self->_flush_cache;
     return 0;
 }
 
@@ -557,6 +560,7 @@ sub e_mknod {
     my $umask          = $ctx->{umask};
     eval {$Self->mknod($path,$mode&(~$umask),$device)};
     return $Self->errno($@) if $@;
+    $Self->_flush_cache;
     return 0;
 }
 
@@ -571,6 +575,7 @@ sub e_create {
 	$Self->open($path,$flags,{});
     };
     return $Self->errno($@) if $@;
+    $Self->_flush_cache;
     return (0,$fh);
 }
 
@@ -596,7 +601,6 @@ sub e_flush {
     return $Self->errno($@) if $@;
     return 0;
 }
- 
 
 sub e_read {
     my ($path,$size,$offset,$fh) = @_;
@@ -648,6 +652,7 @@ sub e_rename {
     my ($oldname,$newname) = @_;
     eval { $Self->rename($oldname,$newname) };
     return $Self->errno($@) if $@;
+    $Self->_flush_cache;
     return 0;
 }
 
@@ -669,6 +674,7 @@ sub e_symlink {
     my ($oldname,$newname) = @_;
     eval {$Self->symlink($oldname,$newname)};
     return $Self->errno($@) if $@;
+    $Self->_flush_cache;
     return 0;
 }
 
@@ -683,6 +689,7 @@ sub e_unlink {
     my $path = shift;
     eval {$Self->unlink($path)};
     return $Self->errno($@) if $@;
+    $Self->_flush_cache;
     return 0;
 }
 
@@ -690,6 +697,7 @@ sub e_rmdir {
     my $path = shift;
     eval {$Self->rmdir($path)};
     return $Self->errno($@) if $@;
+    $Self->_flush_cache;
     return 0;
 }
 
@@ -2015,7 +2023,6 @@ sub initialize_schema {
     eval{$dbh->do('drop index if exists iblock')};
     eval{$dbh->do('drop index if exists ipath')};
 
-    
     $dbh->do($_) foreach split ';',$self->_metadata_table_def;
     $dbh->do($_) foreach split ';',$self->_path_table_def;
     $dbh->do($_) foreach split ';',$self->_extents_table_def;
@@ -2522,8 +2529,8 @@ sub path2inode {
 	($inode,$p_inode,$name) = $self->_dynamic_path2inode($path);
 	$dynamic++ if $inode;
     }
+    warn "_path2inode($path)=>($inode,$p_inode,$name)";
     croak "$path not found" unless $inode;
-
     my $ctx = $self->get_context;
     $self->check_path($self->_dirname($path),$p_inode,@{$ctx}{'uid','gid'}) or die "permission denied";
     return wantarray ? ($inode,$p_inode,$name,$dynamic) : $inode;
@@ -2543,7 +2550,41 @@ sub _dynamic_path2inode {
     return ($inode,$parent,$basename);
 }
 
+sub _flush_cache {
+    my $self = shift;
+#    flush_cache('_path2inode');
+}
+
+# accept: path
+# return: (inode,parent_inode,name)
 sub _path2inode {
+    my $self   = shift;
+    my $path   = shift;
+    $path =~ s/^\///;
+    my @components = $path eq '/' ? () : File::Spec->splitdir($path);
+    unshift @components,'/';
+    my ($parent,$inode);
+    for my $c (@components) {
+	$parent = $inode;
+	warn "_lookup_inode($c,$parent)";
+	$inode  = $self->_lookup_inode($c,$parent);
+    }
+    return ($inode,$parent,$components[-1]);
+}
+
+sub _lookup_inode {
+    my $self = shift;
+    my ($name,$parent_inode) = @_;
+    return 1 unless $parent_inode;
+    my $dbh = $self->dbh;
+    my $sth = $dbh->prepare_cached('select inode from path where name=? and parent=?');
+    $sth->execute($name,$parent_inode);
+    my @v   = $sth->fetchrow_array() or croak "$name not found in inode $parent_inode";
+    $sth->finish;
+    return $v[0];
+}
+
+sub _path2inode_old {
     my $self   = shift;
     my $path   = shift;
     if ($path eq '/') {
@@ -2611,35 +2652,6 @@ sub _dirname {
     my $dir  = dirname($path);
     $dir     = '/' if $dir eq '.'; # work around funniness in dirname()    
     return $dir;
-}
-
-sub _path2inode_sql {
-    my $self   = shift;
-    my $path   = shift;
-    my (undef,$dir,$name) = File::Spec->splitpath($path);
-    my ($parent,@base)    = $self->_path2inode_subselect($dir); # something nicely recursive
-    my $sql               = <<END;
-select p.inode,p.parent,p.name from metadata as m,path as p 
-       where p.name=? and p.parent in ($parent) 
-         and m.inode=p.inode
-END
-;
-    return ($sql,$name,@base);
-}
-
-sub _path2inode_subselect {
-    my $self = shift;
-    my $path = shift;
-    return 'select 1' if $path eq '/' or !length($path);
-    $path =~ s!/$!!;
-    my (undef,$dir,$name) = File::Spec->splitpath($path);
-    my ($parent,@base)    = $self->_path2inode_subselect($dir); # something nicely recursive
-    return (<<END,$name,@base);
-select p.inode from metadata as m,path as p
-    where p.name=? and p.parent in ($parent)
-    and m.inode=p.inode
-END
-;
 }
 
 =head2 $groups = $fs->get_groups($uid,$gid)
