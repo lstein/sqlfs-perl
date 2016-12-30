@@ -25,11 +25,11 @@ Installing DBD Drivers
 
 To install Perl drivers for the supported DBMSs, run one or more of
 the following commands from the command line:
-
+```shell
  % perl -MCPAN -e 'install DBD::mysql'      # Mysql
- % perl -MCPAN -e 'instell DBD::SQLite'     # SQLite
+ % perl -MCPAN -e 'install DBD::SQLite'     # SQLite
  % perl -MCPAN -e 'install DBD::Pg'         # PostgreSQL
-
+ ```
 Using the Module
 ================
 
@@ -40,13 +40,14 @@ must also create an empty directory to serve as the mount point.
 * A SQLite database:
 
 This is very simple.
-
+```shell
  # make the mount point
  $ mkdir /tmp/sqlfs
-
+ 
  # make an empty SQLite database (not really necessary)
  $ touch /home/myself/filesystem.sqlite
-
+ 
+ 
  # run the sqlfs.pl command line tool with the --initialize option
  $ sqlfs.pl dbi:SQLite:/home/lstein/filesystem.sqlite --initialize /tmp/sqlfs
  WARNING: any existing data will be overwritten. Proceed? [y/N] y
@@ -63,7 +64,8 @@ This is very simple.
 
  # unmount the filesystem when you are done
  $ sqlfs.pl -u /tmp/sqlfs
-
+ ```
+ 
 To mount the filesystem again, simply run sqlfs.pl without the
 --initialize option.
 
@@ -71,7 +73,7 @@ To mount the filesystem again, simply run sqlfs.pl without the
 
 You will need to use the mysqladmin tool to create the database and
 grant yourself privileges on it.
-
+ ```shell
  $ mysqladmin -uroot -p create filesystem
  Enter password: 
 
@@ -82,24 +84,26 @@ grant yourself privileges on it.
  mysql> grant all privileges on filesystem.* to myself identified by 'foobar';
  mysql> flush privileges;
  mysql> quit
-
+ ```
 Create the mountpoint, and use the sqlfs.pl script to initialize and
 mount the database as before:
-
+ ```shell
  $ mkdir /tmp/sqlfs
  $ sqlfs.pl 'dbi:mysql:dbname=filesystem;user=myself;password=foobar' --initialize /tmp/sqlfs
  $ echo 'hello world!' > /tmp/sqlfs/hello.txt
+ ``` 
  ... etc ... 
 
 Note that this will work across the network using the extended DBI
 data source syntax (see the DBD::mysql manual page):
 
+ ```shell
  $ sqlfs.pl 'dbi:mysql:filesystem;host=roxy.foo.com;user=myself;password=foobar' /tmp/sqlfs
-
+ ```
 Unmount the filesystem with the -u option:
-
+ ```shell
  $ sqlfs.pl -u /tmp/sqlfs
-
+ ```
 * A PostgreSQL database
 
 Assuming that your login already has the ability to manage PostgreSQL
@@ -109,7 +113,7 @@ databases, creating the database is a one-step process:
 
 Now create the mountpoint and use sqlfs.pl to initialize and mount
 it:
-
+ ```shell
  $ sqlfs.pl 'dbi:Pg:dbname=filesystem' --initialize /tmp/sqlfs
  WARNING: any existing data will be overwritten. Proceed? [y/N] y
  
@@ -118,12 +122,13 @@ it:
 
  # unmount the filesystem when no longer needed
  # sqlfs.pl -u /tmp/sqlfs
-
+ ```
+ 
 Command-Line Tool
 =================
 
 The sqlfs.pl has a number of options listed here:
-
+ ```shell
  Usage:
      % sqlfs.pl [options] dbi:<driver_name>:dbname=<name>;<other_args> <mount point>
 
@@ -151,7 +156,7 @@ The sqlfs.pl has a number of options listed here:
       --man                         full manual page
 
     Options can be abbreviated to single letters.
-
+ ```
 More information can be obtained by passing the sqlfs.pl command the
 --man option.
 
@@ -174,28 +179,28 @@ L<DBI::Filesystem>.
 
 Here is a simple example which will run on all DBMSs. It displays all
 files with size greater than 2 Mb:
-
+ ```sql
  select inode from metadata where size>2000000
-
+ ```
 Another example, which uses MySQL-specific date/time
 math to find all .jpg files created/modified within the last day:
-
+ ```sql
  select m.inode from metadata as m,path as p
      where p.name like '%.jpg'
        and (now()-interval 1 day) <= m.mtime
        and m.inode=p.inode
-
+ ```
 (The date/time math syntax is very slightly different for PostgreSQL
 and considerably different for SQLite)
 
 An example that uses extended attributes to search for all documents
 authored by someone with "Lincoln" in the name:
-
+ ```sql
  select m.inode from metadata as m,xattr as x
     where x.name == 'user.Author'
      and x.value like 'Lincoln%'
      and m.inode=x.inode
-    
+```
 The files contained within the magic directories can be read and
 written just like normal files, but cannot be removed or
 renamed. Directories are excluded from magic directories. If two or
@@ -214,10 +219,10 @@ sufficient bandwith to stream an HD movie. The MySQL engine appears to
 be faster than ext3 for reading, which is puzzling since MySQL's
 database files are on the same ext3 filesystem.
 
-                Local ext3  NFSv4    SQLite     PostgreSQL    MySQL
-                ----------  -----    ------     ----------    -----
-Read  (MB/s)      78.4      60.5     12.6         35.9        98.6
-Write (MB/s)     189.0      45.1     12.5          7.5        12.7
+|             |Local ext3|  NFSv4   | SQLite  |   PostgreSQL|    MySQL   |
+|-------------|----------|----------|---------|-------------|------------|
+|Read  (MB/s) |     78.4 |     60.5 |    12.6 |       35.9  |       98.6 |
+|Write (MB/s) |    189.0 |     45.1 |    12.5 |         7.5 |       12.7 |
 
 (These benchmarks were performed on a commodity intel i3 laptop @ 2.60
 GHz, using a SATA II internal hard disk. The write test consisted of
