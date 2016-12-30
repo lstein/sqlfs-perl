@@ -75,7 +75,7 @@ sub _get_unix_timestamp_sql {
 }
 
 sub _now_sql {
-    return "'now'";
+    return "current_timestamp";
 }
 
 sub _update_utime_sql {
